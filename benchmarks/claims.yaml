@@ -1,0 +1,26 @@
+claims:
+  - id: mnj_switch_detection
+    claim: MNJ detects local dynamical regime switches
+    test: golden_a_piecewise
+    negative_control: time_shuffle, random_neighbors
+    expected_failure_mode: effect size collapses under controls
+  - id: golden_a_within_regime
+    claim: Regime-aware modeling improves one-step prediction vs a single global model under mixed regimes
+    test: prediction_gain_data_segmented_global_honest_middle vs random_split_honest_middle_mean
+    negative_control: segmented_shuffled, random_split_mean
+    expected_failure_mode: data-segmented ≈ random or controls do not collapse
+  - id: golden_a_cross_regime_stress
+    claim: Models trained primarily pre-switch do not necessarily generalize post-switch; persistence can dominate
+    test: prediction_gain_y_global_honest_tail (warn on negative)
+    negative_control: n/a
+    expected_failure_mode: negative gain on tail evaluation
+  - id: sampling_degradation
+    claim: MNJ recovery degrades with coarser sampling
+    test: golden_a_piecewise dt_obs sweep
+    negative_control: n/a
+    expected_failure_mode: non-decreasing curve or weak rank correlation
+  - id: confound_identifiability
+    claim: MNPS/MNJ can separate mechanisms under matched first-order stats
+    test: golden_b2_boundary
+    negative_control: parameter_swap
+    expected_failure_mode: EVR/MNJ differences collapse under swap

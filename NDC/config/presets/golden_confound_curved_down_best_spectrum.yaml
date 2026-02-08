@@ -1,0 +1,40 @@
+seed: 7
+latent_dim: 3
+initial_state: [0, 0, 0]
+time:
+  t_start: 0.0
+  t_end: 6.0
+  dt_sim: 0.01
+  dt_obs: 0.05
+  window: 0.5
+  step: 0.25
+landscape:
+  name: quadratic_well
+  params:
+    curvature: [0.4, 0.4, 0.4]
+rvc:
+  name: null_gate
+  params:
+    sigma0: 0.17
+circulation:
+  name: none
+  params: {}
+driver:
+  name: sine_rhythm
+  params:
+    amplitude: 0.0
+    frequency: 1.0
+observer:
+  name: oracle
+  params: {}
+plasticity:
+  name: static
+  params: {}
+scheduler:
+  default_label: wake
+  regimes: []
+output:
+  output_dir: outputs
+  file_prefix: golden_confound_curved_down_best_spectrum
+notes:
+  comment: "Pareto candidate: best_spectrum (sigma0=0.17, curvature=0.4)."

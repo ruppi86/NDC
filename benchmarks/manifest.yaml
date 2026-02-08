@@ -1,0 +1,54 @@
+manifest_version: "0.1"
+claims_matrix:
+  - id: golden_a_within_regime
+    claim: Regime-aware modeling improves one-step prediction vs a single global model under mixed regimes
+    test: prediction_gain_data_segmented_global_honest_middle vs random_split_honest_middle_mean
+    negative_control: segmented_shuffled, random_split_mean
+    expected_failure_mode: data-segmented ≈ random or controls do not collapse
+  - id: golden_a_cross_regime_stress
+    claim: Models trained primarily pre-switch do not necessarily generalize post-switch; persistence can dominate
+    test: prediction_gain_y_global_honest_tail (warn on negative)
+    negative_control: n/a
+    expected_failure_mode: negative gain on tail evaluation
+benchmarks:
+  - id: golden_a_piecewise
+    type: golden_a
+    preset: NDC/config/presets/golden_piecewise_jacobian.yaml
+    t_switch: 3.0
+    dt_obs_sweep: [0.01, 0.02, 0.05, 0.1]
+    min_seg_seconds: 1.5
+    oracle_opt_window_seconds: 0.5
+    selection_fraction: 0.7
+    mnj_gate_derivative_method: discrete_step
+    k_neighbors_grid: [10, 15, 20]
+    ridge_lambda_grid: [0.0001, 0.001, 0.01]
+    derivative_methods: ["finite_diff"]
+    thresholds:
+      effect_size_min: 0.2
+      time_shuffle_max: 0.2
+      random_neighbors_max: 0.2
+      grid_pass_rate_min: 0.6
+      grid_leak_rate_max: 0.3
+    checks:
+      segmented_random_split_beaten: honest_middle
+      global_honest_tail_nonnegative: warn_only
+      mnj_gate_beats_dy_gate: honest_middle
+      mnj_gate_beats_random: honest_middle
+      mnj_gate_shuffled_collapse: honest_middle
+  - id: golden_b2_boundary
+    type: golden_b2
+    preset: NDC/config/presets/golden_confound_boundary_candidate.yaml
+    target_preset: NDC/config/presets/golden_confound_curved_high.yaml
+    thresholds:
+      evr_dist_max: 0.1
+      trust_min: 0.5
+      trust_ratio_min: 0.8
+      boundary_hit_max: 0.1
+  - id: invariance_stress
+    type: invariance_stress
+    preset: NDC/config/presets/golden_piecewise_jacobian.yaml
+    dt_obs_sweep: [0.01, 0.02, 0.05, 0.1, 0.2]
+    metric: rel_mse_baseline_median
+    direction: increase
+    thresholds:
+      improvement_max: 0.1

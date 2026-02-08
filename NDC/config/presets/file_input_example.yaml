@@ -1,0 +1,41 @@
+seed: 7
+latent_dim: 10
+initial_state: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+time:
+  t_start: 0.0
+  t_end: 2.0
+  dt_sim: 0.001
+  dt_obs: 0.01
+  window: 0.5
+  step: 0.25
+landscape:
+  name: quadratic_well
+  params: {}
+rvc:
+  name: linear_gate
+  params:
+    sigma_min: 0.2
+    sigma_max: 1.0
+driver:
+  name: file_timeseries
+  params:
+    path: input/example_ndc_input.csv
+    file_format: csv
+    extrapolation: clamp
+observer:
+  name: linear
+  params:
+    output_dim: 6
+    noise_sigma: 0.05
+plasticity:
+  name: static
+  params: {}
+scheduler:
+  default_label: wake
+  regimes: []
+output:
+  output_dir: outputs
+  file_prefix: file_input_example
+notes:
+  comment: "Example run using external input trace from input/example_ndc_input.csv"
+
