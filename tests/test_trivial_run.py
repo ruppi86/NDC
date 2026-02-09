@@ -6,6 +6,7 @@ from NDC.experiments.runner import run_experiment
 
 
 def test_trivial_run(tmp_path: Path):
+    """Smoke test to ensure the simulator can run with a minimal configuration."""
     cfg = {
         "seed": 1,
         "latent_dim": 3,

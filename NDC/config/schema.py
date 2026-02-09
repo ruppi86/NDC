@@ -10,6 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TimeConfig(BaseModel):
+    """Configuration for simulation and observation time parameters.
+
+    Attributes:
+        t_start: Start time of the simulation.
+        t_end: End time of the simulation.
+        dt_sim: Simulation time step.
+        dt_obs: Observation (sampling) time step.
+        window: Analysis window size.
+        step: Analysis step size.
+        downsample_method: Method for downsampling ("interp", "nearest", or "decimate").
+    """
     model_config = ConfigDict(extra="forbid")
 
     t_start: float = 0.0
@@ -34,6 +45,12 @@ class TimeConfig(BaseModel):
 
 
 class LandscapeConfig(BaseModel):
+    """Configuration for the energy landscape.
+
+    Attributes:
+        name: Name of the landscape model.
+        params: Parameters for the landscape model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "quadratic_well"
@@ -41,6 +58,12 @@ class LandscapeConfig(BaseModel):
 
 
 class RVCConfig(BaseModel):
+    """Configuration for Rhythmic Variance Control (RVC).
+
+    Attributes:
+        name: Name of the RVC gate model.
+        params: Parameters for the RVC gate model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "null_gate"
@@ -48,6 +71,12 @@ class RVCConfig(BaseModel):
 
 
 class DriverConfig(BaseModel):
+    """Configuration for the external driver.
+
+    Attributes:
+        name: Name of the driver model.
+        params: Parameters for the driver model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "sine_rhythm"
@@ -55,6 +84,12 @@ class DriverConfig(BaseModel):
 
 
 class ObserverConfig(BaseModel):
+    """Configuration for the observer model.
+
+    Attributes:
+        name: Name of the observer model.
+        params: Parameters for the observer model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "oracle"
@@ -62,6 +97,12 @@ class ObserverConfig(BaseModel):
 
 
 class PlasticityConfig(BaseModel):
+    """Configuration for latent space plasticity.
+
+    Attributes:
+        name: Name of the plasticity model.
+        params: Parameters for the plasticity model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "static"
@@ -69,6 +110,12 @@ class PlasticityConfig(BaseModel):
 
 
 class CirculationConfig(BaseModel):
+    """Configuration for drift circulation.
+
+    Attributes:
+        name: Name of the circulation model ("none" or "rotation").
+        params: Parameters for the circulation model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "none"
@@ -82,6 +129,12 @@ class CirculationConfig(BaseModel):
 
 
 class BoundaryConfig(BaseModel):
+    """Configuration for latent space boundaries.
+
+    Attributes:
+        name: Name of the boundary model ("none" or "reflecting_box").
+        params: Parameters for the boundary model.
+    """
     model_config = ConfigDict(extra="forbid")
 
     name: str = "none"
@@ -95,6 +148,13 @@ class BoundaryConfig(BaseModel):
 
 
 class RegimeSegment(BaseModel):
+    """A segment of time with a specific regime label.
+
+    Attributes:
+        label: Label for the regime (e.g., "wake", "sleep").
+        start: Start time of the segment.
+        end: End time of the segment.
+    """
     model_config = ConfigDict(extra="forbid")
 
     label: str
@@ -109,6 +169,12 @@ class RegimeSegment(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
+    """Configuration for the regime scheduler.
+
+    Attributes:
+        default_label: Default regime label.
+        regimes: List of regime segments.
+    """
     model_config = ConfigDict(extra="forbid")
 
     default_label: str = "wake"
@@ -116,6 +182,13 @@ class SchedulerConfig(BaseModel):
 
 
 class OutputConfig(BaseModel):
+    """Configuration for experiment output.
+
+    Attributes:
+        output_dir: Directory to save results.
+        file_prefix: Prefix for result filenames.
+        save_oracle: Whether to save oracle (latent) data.
+    """
     model_config = ConfigDict(extra="forbid")
 
     output_dir: str = "outputs"
@@ -124,6 +197,24 @@ class OutputConfig(BaseModel):
 
 
 class ExperimentConfig(BaseModel):
+    """Full configuration for a synthetic NDC experiment.
+
+    Attributes:
+        seed: Random seed for reproducibility.
+        latent_dim: Dimension of the latent space.
+        initial_state: Optional initial state vector.
+        time: Timing configuration.
+        landscape: Landscape configuration.
+        rvc: Rhythmic Variance Control configuration.
+        driver: External driver configuration.
+        observer: Observer configuration.
+        plasticity: Plasticity configuration.
+        circulation: Circulation configuration.
+        boundary: Boundary configuration.
+        scheduler: Regime scheduler configuration.
+        output: Output configuration.
+        notes: Additional metadata for the experiment.
+    """
     model_config = ConfigDict(extra="forbid")
 
     seed: int = 0
@@ -151,7 +242,14 @@ class ExperimentConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
-    """Load an experiment config from YAML."""
+    """Load an experiment configuration from a YAML file.
+
+    Args:
+        path: Path to the YAML configuration file.
+
+    Returns:
+        The validated ExperimentConfig object.
+    """
     config_path = Path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     return ExperimentConfig.model_validate(raw)

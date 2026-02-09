@@ -12,6 +12,17 @@ def resample_series(
     *,
     method: str = "interp",
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Resample a time series to a new sampling interval.
+
+    Args:
+        times: Original time points.
+        values: Original values.
+        dt_obs: Target sampling interval.
+        method: Resampling method ("interp", "nearest", or "decimate").
+
+    Returns:
+        A tuple of (new_times, new_values).
+    """
     t_start = float(times[0])
     t_end = float(times[-1])
 
@@ -46,6 +57,17 @@ def resample_series(
 def windowed_mean(
     times: np.ndarray, values: np.ndarray, window: float, step: float
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate moving average in windows.
+
+    Args:
+        times: Time points.
+        values: Values to average.
+        window: Window size.
+        step: Step size between windows.
+
+    Returns:
+        A tuple of (window_centers, averaged_values).
+    """
     t_start = float(times[0])
     t_end = float(times[-1])
     centers = np.arange(t_start + window / 2.0, t_end - window / 2.0 + step * 0.5, step)

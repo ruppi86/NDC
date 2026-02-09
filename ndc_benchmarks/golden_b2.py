@@ -14,6 +14,16 @@ from .types import BenchmarkResult
 
 
 def _golden_b2(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> BenchmarkResult:
+    """Run the Golden B2 benchmark.
+
+    Args:
+        bench: Benchmark specification from manifest.
+        out_dir: Directory for storing output files.
+        smoke: Whether to run in smoke test mode.
+
+    Returns:
+        The benchmark results.
+    """
     preset = Path(bench["preset"])
     target = Path(bench["target_preset"])
     thresholds = bench.get("thresholds", {})

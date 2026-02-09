@@ -17,6 +17,17 @@ from NDC.drivers.base import Driver
 def _sample_noise(
     sigma: np.ndarray | float, dt: float, dim: int, rng: np.random.Generator
 ) -> np.ndarray:
+    """Sample Gaussian noise with specified variance/covariance.
+
+    Args:
+        sigma: Standard deviation (scalar/vector) or covariance matrix.
+        dt: Integration time step.
+        dim: Dimension of the noise vector.
+        rng: Random number generator.
+
+    Returns:
+        Sampled noise vector.
+    """
     if np.isscalar(sigma):
         return float(sigma) * np.sqrt(dt) * rng.standard_normal(dim)
     sigma_arr = np.asarray(sigma, dtype=float)
@@ -41,7 +52,24 @@ def euler_maruyama(
     circulation: np.ndarray | None = None,
     boundary: dict | None = None,
 ) -> Trajectory:
-    """Integrate dX = -âˆ‡F dt + sigma dW with optional control input."""
+    """Integrate dX = -âˆ‡F dt + sigma dW with optional control input.
+
+    Args:
+        landscape: Energy landscape defining the potential field.
+        rvc: Rhythmic Variance Control for noise scaling.
+        driver: External driver for rhythm and control inputs.
+        x0: Initial state vector.
+        t_start: Start time.
+        t_end: End time.
+        dt: Simulation time step.
+        rng: Random number generator.
+        geometry: Optional geometry (metric tensor) for the drift term.
+        circulation: Optional antisymmetric matrix for drift rotation.
+        boundary: Optional boundary configuration.
+
+    Returns:
+        A Trajectory object containing the simulation results.
+    """
     if geometry is None:
         geometry = IdentityGeometry()
 

@@ -1,4 +1,9 @@
-"""Benchmark harness package."""
+"""Benchmark harness package for synthetic NDC.
+
+This package provides the infrastructure for running and reporting on
+benchmarks that validate the performance and reliability of the NDC
+analysis and simulation tools.
+"""
 from __future__ import annotations
 
 import sys

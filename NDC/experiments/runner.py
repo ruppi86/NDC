@@ -329,6 +329,15 @@ def _run_from_cfg(
 
 
 def run_experiment(config_path: str | Path, output_dir: str | Path | None = None) -> dict[str, Any]:
+    """Run an NDC experiment from a configuration file.
+
+    Args:
+        config_path: Path to the YAML configuration file.
+        output_dir: Optional override for the output directory.
+
+    Returns:
+        A dictionary containing experiment results and metadata.
+    """
     config_path = Path(config_path)
     raw_text = config_path.read_text(encoding="utf-8")
     cfg = load_config(config_path)
@@ -337,6 +346,15 @@ def run_experiment(config_path: str | Path, output_dir: str | Path | None = None
 
 
 def run_experiment_from_config(config: ExperimentConfig, output_dir: str | Path | None = None) -> dict[str, Any]:
+    """Run an NDC experiment from an ExperimentConfig object.
+
+    Args:
+        config: The experiment configuration object.
+        output_dir: Optional override for the output directory.
+
+    Returns:
+        A dictionary containing experiment results and metadata.
+    """
     config_hash = _hash_config_text(json.dumps(config.model_dump(), sort_keys=True))
     results, _ = _run_from_cfg(config, config_hash, output_dir=output_dir)
     return results

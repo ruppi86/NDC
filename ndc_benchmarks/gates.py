@@ -8,6 +8,14 @@ from ndc_analysis.mnps import compute_mnps
 
 
 def _gate_signal_dy(Y: np.ndarray) -> np.ndarray:
+    """Compute a simple gate signal based on the norm of dY/dt.
+
+    Args:
+        Y: The observed time series.
+
+    Returns:
+        The gate signal (norm of differences between consecutive states).
+    """
     if Y.shape[0] < 2:
         return np.zeros(Y.shape[0], dtype=float)
     dY = np.linalg.norm(Y[1:] - Y[:-1], axis=1)
@@ -23,6 +31,19 @@ def _gate_signal_mnj(
     derivative_method: str = "discrete_step",
     random_seed: int = 0,
 ) -> tuple[np.ndarray, dict[str, float]]:
+    """Compute a gate signal using MNJ (Minimal Numerical Jacobian).
+
+    Args:
+        Y: The observed time series.
+        t: The time points.
+        k_neighbors: Number of neighbors for local Jacobian estimation.
+        ridge_lambda: Regularization parameter.
+        derivative_method: Method for computing derivatives.
+        random_seed: Seed for random number generator.
+
+    Returns:
+        A tuple containing (weighted_gate_signal, diagnostics_dict).
+    """
     def _quantiles(values: np.ndarray) -> tuple[float, float, float]:
         vals = values[np.isfinite(values)]
         if vals.size == 0:

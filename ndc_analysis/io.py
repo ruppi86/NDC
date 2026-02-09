@@ -11,11 +11,13 @@ import numpy as np
 
 
 def load_observation_export(path: str | Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Load Observation Export v1 HDF5.
+    """Load Observation Export v1 HDF5 without simulator dependencies.
+
+    Args:
+        path: Path to the HDF5 observation export file.
 
     Returns:
-        data: dict with keys t, Y, optional rhythm/control/win_t/win_Y
-        metadata: dict parsed from attrs["metadata"]
+        A tuple of (data_dict, metadata_dict).
     """
     path = Path(path)
     with h5py.File(path, "r") as h5:

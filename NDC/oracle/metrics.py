@@ -8,6 +8,15 @@ from NDC.dynamics.state import Trajectory
 
 
 def compute_oracle_metrics(traj: Trajectory) -> dict[str, float]:
+    """Compute various metrics from a latent trajectory.
+
+    Args:
+        traj: The latent trajectory to analyze.
+
+    Returns:
+        A dictionary containing computed metrics such as mean speed, path length,
+        effective dimensionality, and correlation with the rhythmic signal.
+    """
     diffs = np.diff(traj.states, axis=0)
     dt = np.diff(traj.times)
     if dt.size == 0:

@@ -57,17 +57,26 @@ def export_observations(
     windowed_times: np.ndarray | None = None,
     windowed_values: np.ndarray | None = None,
 ) -> None:
-    """Write Observation Export v1.
+    """Write Observation Export v1 to an HDF5 file.
 
     Required datasets:
-      - t: (T,)
-      - Y: (T, P)
+      - t: (T,) Simulation times.
+      - Y: (T, P) Observed values.
     Optional datasets:
-      - rhythm: (T,)
-      - control: (T, latent_dim)
-      - win_t: (Tw,)
-      - win_Y: (Tw, P)
-    Metadata stored as JSON in attrs["metadata"].
+      - rhythm: (T,) Rhythmic component.
+      - control: (T, latent_dim) Control input.
+      - win_t: (Tw,) Windowed analysis times.
+      - win_Y: (Tw, P) Windowed analysis values.
+
+    Args:
+        path: Output file path.
+        times: Array of simulation times.
+        values: Array of observed values.
+        metadata: Export metadata object.
+        rhythm: Optional array of rhythmic components.
+        control: Optional array of control inputs.
+        windowed_times: Optional array of windowed times.
+        windowed_values: Optional array of windowed values.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +100,14 @@ def export_observations(
 
 
 def load_observations(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load Observation Export v1 into dicts (data + metadata)."""
+    """Load Observation Export v1 from an HDF5 file.
+
+    Args:
+        path: Path to the HDF5 file.
+
+    Returns:
+        A tuple containing (data_dict, metadata_dict).
+    """
     path = Path(path)
     with h5py.File(path, "r") as h5:
         data: dict[str, Any] = {

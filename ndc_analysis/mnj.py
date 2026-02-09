@@ -230,7 +230,20 @@ def fit_local_jacobian(
     neighbor_strategy: NeighborStrategy = "knn",
     random_seed: int = 0,
 ) -> MNJResult:
-    """Convenience wrapper for the default local Jacobian estimator."""
+    """Convenience wrapper for the default local Jacobian estimator.
+
+    Args:
+        X: Embedded state trajectory.
+        t: Time points.
+        k_neighbors: Number of neighbors for local regression.
+        ridge_lambda: Regularization parameter.
+        derivative_method: Method for computing time derivatives.
+        neighbor_strategy: Strategy for selecting neighbors.
+        random_seed: Seed for random number generator.
+
+    Returns:
+        An MNJResult containing estimated Jacobians and diagnostics.
+    """
     estimator = LocalJacobianEstimator(
         LocalJacobianConfig(
             k_neighbors=k_neighbors,

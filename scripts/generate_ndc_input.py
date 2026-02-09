@@ -33,6 +33,14 @@ class GenConfig:
 
 
 def generate(cfg: GenConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate rhythmic and control time series based on a configuration.
+
+    Args:
+        cfg: The generation configuration.
+
+    Returns:
+        A tuple of (times, rhythm, control_matrix).
+    """
     times = np.arange(cfg.t_start, cfg.t_end + cfg.dt * 0.5, cfg.dt, dtype=float)
     rhythm = cfg.rhythm_offset + cfg.rhythm_amp * np.sin(2.0 * np.pi * cfg.rhythm_freq * times)
     if cfg.rhythm_mode == "bursty":

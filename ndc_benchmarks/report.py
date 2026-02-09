@@ -7,6 +7,15 @@ from .types import BenchmarkResult, REPORT_VERSION
 
 
 def _render_report(results: dict[str, BenchmarkResult], claims: list[dict[str, Any]]) -> str:
+    """Render a Markdown report from benchmark results and claims.
+
+    Args:
+        results: Dictionary mapping benchmark IDs to their results.
+        claims: List of claim dictionaries from the claims matrix.
+
+    Returns:
+        A string containing the formatted Markdown report.
+    """
     lines = ["# Benchmark Report", f"report_version: {REPORT_VERSION}", ""]
     if claims:
         lines.append("## Claims Matrix")
@@ -236,6 +245,14 @@ def _render_report(results: dict[str, BenchmarkResult], claims: list[dict[str, A
 
 
 def _build_sections(results: dict[str, BenchmarkResult]) -> list[dict[str, Any]]:
+    """Build structured report sections for JSON serialization.
+
+    Args:
+        results: Dictionary mapping benchmark IDs to their results.
+
+    Returns:
+        A list of section dictionaries containing title, metrics, and checks.
+    """
     sections: list[dict[str, Any]] = []
     a_key = "golden_a_piecewise"
     if a_key in results:

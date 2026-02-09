@@ -7,6 +7,15 @@ import numpy as np
 
 
 def _fit_global_var(Y: np.ndarray, *, ridge_lambda: float) -> np.ndarray:
+    """Fit a global linear model to the entire time series.
+
+    Args:
+        Y: The observed time series.
+        ridge_lambda: Regularization parameter.
+
+    Returns:
+        The fitted model coefficients.
+    """
     Xn = Y[:-1]
     Yn = Y[1:]
     ones = np.ones((Xn.shape[0], 1), dtype=float)
@@ -17,6 +26,15 @@ def _fit_global_var(Y: np.ndarray, *, ridge_lambda: float) -> np.ndarray:
 
 
 def _predict_global_var(Y: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Predict the next state using a global linear model.
+
+    Args:
+        Y: The observed time series.
+        B: The model coefficients.
+
+    Returns:
+        The predicted next states.
+    """
     Xn = Y[:-1]
     ones = np.ones((Xn.shape[0], 1), dtype=float)
     Xn_aug = np.hstack([Xn, ones])
@@ -24,6 +42,16 @@ def _predict_global_var(Y: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def _fit_var_pairs(Xn: np.ndarray, Yn: np.ndarray, *, ridge_lambda: float) -> np.ndarray:
+    """Fit a linear model to pairs of states.
+
+    Args:
+        Xn: The current states.
+        Yn: The next states.
+        ridge_lambda: Regularization parameter.
+
+    Returns:
+        The fitted model coefficients.
+    """
     ones = np.ones((Xn.shape[0], 1), dtype=float)
     Xn_aug = np.hstack([Xn, ones])
     XtX = Xn_aug.T @ Xn_aug
@@ -32,17 +60,45 @@ def _fit_var_pairs(Xn: np.ndarray, Yn: np.ndarray, *, ridge_lambda: float) -> np
 
 
 def _predict_var_pairs(Xn: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Predict next states using fitted coefficients.
+
+    Args:
+        Xn: The current states.
+        B: The model coefficients.
+
+    Returns:
+        The predicted next states.
+    """
     ones = np.ones((Xn.shape[0], 1), dtype=float)
     Xn_aug = np.hstack([Xn, ones])
     return Xn_aug @ B
 
 
 def _sse_pairs(Xn: np.ndarray, Yn: np.ndarray, B: np.ndarray) -> float:
+    """Calculate the sum of squared errors for a prediction.
+
+    Args:
+        Xn: The current states.
+        Yn: The true next states.
+        B: The model coefficients.
+
+    Returns:
+        The sum of squared errors.
+    """
     pred = _predict_var_pairs(Xn, B)
     return float(np.sum((pred - Yn) ** 2))
 
 
 def _global_gain_from_model(eval_Y: np.ndarray, B: np.ndarray) -> dict[str, float]:
+    """Compute prediction gain for an evaluation set using a model.
+
+    Args:
+        eval_Y: The evaluation time series.
+        B: The model coefficients.
+
+    Returns:
+        A dictionary containing 'gain', 'mse_model', and 'mse_baseline'.
+    """
     if eval_Y.shape[0] < 2:
         return {"gain": 0.0, "mse_model": 0.0, "mse_baseline": 0.0}
     eval_X = eval_Y[:-1]
@@ -57,6 +113,16 @@ def _global_gain_from_model(eval_Y: np.ndarray, B: np.ndarray) -> dict[str, floa
 def _global_gain_fit_eval(
     fit_Y: np.ndarray, eval_Y: np.ndarray, *, ridge_lambda: float
 ) -> dict[str, float]:
+    """Fit a model on one set and evaluate gain on another.
+
+    Args:
+        fit_Y: The training time series.
+        eval_Y: The evaluation time series.
+        ridge_lambda: Regularization parameter.
+
+    Returns:
+        A dictionary containing prediction metrics.
+    """
     if fit_Y.shape[0] < 2:
         return {"gain": 0.0, "mse_model": 0.0, "mse_baseline": 0.0}
     B = _fit_global_var(fit_Y, ridge_lambda=ridge_lambda)
@@ -66,6 +132,16 @@ def _global_gain_fit_eval(
 def _candidate_split_indices_by_time(
     t: np.ndarray, *, t_center: float, window_seconds: float
 ) -> np.ndarray:
+    """Find split indices within a time window around a center.
+
+    Args:
+        t: The time points.
+        t_center: The center time for the window.
+        window_seconds: The half-width of the window in seconds.
+
+    Returns:
+        An array of candidate split indices.
+    """
     if t.shape[0] < 2:
         return np.array([], dtype=int)
     lo = t_center - window_seconds
@@ -80,6 +156,17 @@ def _find_split_by_sse(
     ridge_lambda: float,
     candidate_indices: np.ndarray | None = None,
 ) -> dict[str, float] | None:
+    """Find the best split index that minimizes the combined SSE of two segments.
+
+    Args:
+        Y: The observed time series.
+        min_seg_steps: Minimum number of steps in each segment.
+        ridge_lambda: Regularization parameter.
+        candidate_indices: Optional subset of indices to search.
+
+    Returns:
+        A dictionary with split details or None if no split is possible.
+    """
     T = Y.shape[0]
     max_s = (T - 1) - min_seg_steps
     if min_seg_steps > max_s:
@@ -151,6 +238,18 @@ def _segmented_global_gain_from_split(
     split_idx_eval: int | None = None,
     ridge_lambda: float,
 ) -> dict[str, float]:
+    """Compute prediction gain for a segmented model.
+
+    Args:
+        fit_Y: The training time series.
+        eval_Y: The evaluation time series.
+        split_idx_fit: The split index for the training set.
+        split_idx_eval: Optional split index for the evaluation set.
+        ridge_lambda: Regularization parameter.
+
+    Returns:
+        A dictionary containing prediction metrics.
+    """
     fit_X = fit_Y[:-1]
     fit_Yn = fit_Y[1:]
     if split_idx_fit <= 0 or split_idx_fit >= fit_X.shape[0]:

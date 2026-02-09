@@ -48,18 +48,28 @@ def export_oracle(
     boundary_hit_flags: np.ndarray | None = None,
     a_true: np.ndarray | None = None,
 ) -> None:
-    """Write Oracle Export v1.
+    """Write Oracle Export v1 to an HDF5 file.
 
     Required datasets:
-      - t: (T,)
-      - X: (T, latent_dim)
+      - t: (T,) Simulation times.
+      - X: (T, latent_dim) Latent states.
     Optional datasets:
-      - rhythm: (T,)
-      - control: (T, latent_dim)
-      - regime: (T,) string labels
-      - boundary_hit: (T,) boolean
-      - A_true: (T, latent_dim, latent_dim)
-    Metadata stored as JSON in attrs["metadata"].
+      - rhythm: (T,) Rhythmic component.
+      - control: (T, latent_dim) Control input.
+      - regime: (T,) Regime labels.
+      - boundary_hit: (T,) Boundary hit flags.
+      - A_true: (T, latent_dim, latent_dim) True Jacobian matrices.
+
+    Args:
+        path: Output file path.
+        times: Array of simulation times.
+        states: Array of latent states.
+        metadata: Oracle export metadata object.
+        rhythm: Optional array of rhythmic components.
+        control: Optional array of control inputs.
+        regimes: Optional array of regime labels.
+        boundary_hit_flags: Optional array of boundary hit flags.
+        a_true: Optional array of true Jacobians.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +98,14 @@ def export_oracle(
 
 
 def load_oracle(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load Oracle Export v1 into dicts (data + metadata)."""
+    """Load Oracle Export v1 from an HDF5 file.
+
+    Args:
+        path: Path to the HDF5 file.
+
+    Returns:
+        A tuple containing (data_dict, metadata_dict).
+    """
     path = Path(path)
     with h5py.File(path, "r") as h5:
         data: dict[str, Any] = {

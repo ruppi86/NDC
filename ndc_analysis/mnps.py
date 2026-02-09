@@ -163,6 +163,15 @@ def compute_mnps(
     k: int = 3,
     normalize: NormalizeMode = "zscore",
 ) -> MNPSResult:
-    """Compute a minimal MNPS embedding via PCA."""
+    """Compute a minimal MNPS embedding via PCA.
+
+    Args:
+        Y: Observed feature matrix.
+        k: Dimension of the embedding.
+        normalize: Normalization mode.
+
+    Returns:
+        An MNPSResult containing the embedded states and variance stats.
+    """
     result, _ = compute_mnps_with_diagnostics(Y, k=k, normalize=normalize)
     return result

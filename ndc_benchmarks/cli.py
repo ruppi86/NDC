@@ -14,6 +14,11 @@ from .types import BenchmarkResult, REPORT_VERSION
 
 
 def main() -> None:
+    """Main entrypoint for the NDC benchmark suite CLI.
+
+    Loads the manifest and claims, runs each specified benchmark,
+    and renders a report to the output directory.
+    """
     p = argparse.ArgumentParser(description="Run NDC benchmark suite.")
     p.add_argument("--manifest", default="benchmarks/manifest.yaml")
     p.add_argument("--out-dir", default="outputs/benchmarks")

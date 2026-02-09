@@ -37,6 +37,15 @@ from .types import BenchmarkResult
 
 
 def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
+    """Calculate Cohen's d effect size between two groups.
+
+    Args:
+        a: First data array.
+        b: Second data array.
+
+    Returns:
+        The computed Cohen's d.
+    """
     if a.size == 0 or b.size == 0:
         return 0.0
     mean_diff = float(np.mean(a) - np.mean(b))
@@ -47,6 +56,16 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _monotonic(values: Iterable[float], *, direction: str, tol: float) -> bool:
+    """Check if a sequence of values is monotonic.
+
+    Args:
+        values: The sequence of values.
+        direction: 'increase' or 'decrease'.
+        tol: Tolerance for non-monotonicity.
+
+    Returns:
+        True if the sequence is monotonic within tolerance.
+    """
     vals = list(values)
     for i in range(1, len(vals)):
         if direction == "decrease":
@@ -61,6 +80,14 @@ def _monotonic(values: Iterable[float], *, direction: str, tol: float) -> bool:
 
 
 def _rankdata(x: list[float]) -> np.ndarray:
+    """Compute ranks for a list of values.
+
+    Args:
+        x: List of numeric values.
+
+    Returns:
+        Array of ranks.
+    """
     order = np.argsort(x)
     ranks = np.empty(len(x), dtype=float)
     ranks[order] = np.arange(1, len(x) + 1, dtype=float)
@@ -68,6 +95,15 @@ def _rankdata(x: list[float]) -> np.ndarray:
 
 
 def _spearmanr(x: Iterable[float], y: Iterable[float]) -> float:
+    """Compute Spearman's rank correlation coefficient.
+
+    Args:
+        x: First sequence.
+        y: Second sequence.
+
+    Returns:
+        The Spearman correlation coefficient.
+    """
     x_list = list(x)
     y_list = list(y)
     if len(x_list) < 2 or len(y_list) != len(x_list):
@@ -83,6 +119,15 @@ def _spearmanr(x: Iterable[float], y: Iterable[float]) -> float:
 
 
 def _auc(x: Iterable[float], y: Iterable[float]) -> float:
+    """Compute the Area Under the Curve using the trapezoidal rule.
+
+    Args:
+        x: X-coordinates of points.
+        y: Y-coordinates of points.
+
+    Returns:
+        The computed area.
+    """
     x_list = list(x)
     y_list = list(y)
     if len(x_list) < 2 or len(x_list) != len(y_list):
@@ -96,6 +141,16 @@ def _auc(x: Iterable[float], y: Iterable[float]) -> float:
 def _align_oracle_matrix(
     oracle_t: np.ndarray, oracle_a: np.ndarray, obs_t: np.ndarray
 ) -> np.ndarray:
+    """Align oracle Jacobian matrices to observation time points.
+
+    Args:
+        oracle_t: Oracle time points.
+        oracle_a: Oracle Jacobian matrices.
+        obs_t: Observation time points.
+
+    Returns:
+        Aligned Jacobian matrices for each observation time.
+    """
     idx = np.searchsorted(oracle_t, obs_t, side="left")
     idx = np.clip(idx, 1, len(oracle_t) - 1)
     left = oracle_t[idx - 1]
@@ -107,6 +162,16 @@ def _align_oracle_matrix(
 
 
 def _oracle_center(meta: dict[str, Any], t: float, dim: int) -> np.ndarray:
+    """Retrieve the oracle landscape center at time t.
+
+    Args:
+        meta: Metadata dictionary.
+        t: Current time.
+        dim: Dimension of the latent space.
+
+    Returns:
+        The center vector.
+    """
     params = meta.get("extra", {}).get("landscape_params", {})
     if "center_a" in params and "center_b" in params:
         t_switch = float(params.get("t_switch", 0.0))
@@ -128,6 +193,21 @@ def _prediction_metrics(
     fit_Y: np.ndarray | None = None,
     eval_Y: np.ndarray | None = None,
 ) -> dict[str, float | None]:
+    """Compute prediction metrics for a given observation series.
+
+    Args:
+        Y: Observed feature matrix.
+        t: Time points.
+        oracle_path: Path to oracle data file.
+        neighbor_strategy: Strategy for local map estimation.
+        random_seed: Seed for random number generator.
+        ridge_lambda: Regularization parameter.
+        fit_Y: Optional training data override.
+        eval_Y: Optional evaluation data override.
+
+    Returns:
+        A dictionary of prediction metrics.
+    """
     fit_Y = Y if fit_Y is None else fit_Y
     eval_Y = Y if eval_Y is None else eval_Y
     if fit_Y.shape[0] != eval_Y.shape[0] or fit_Y.shape[1] != eval_Y.shape[1]:
@@ -202,6 +282,22 @@ def _prediction_gain_y_local(
     max_k: int = 25,
     window_steps: int | None = None,
 ) -> dict[str, float]:
+    """Compute prediction gain using local linear maps on observations.
+
+    Args:
+        Y: Observed feature matrix.
+        k_neighbors: Number of neighbors.
+        ridge_lambda: Regularization parameter.
+        neighbor_strategy: Strategy for finding neighbors.
+        random_seed: Seed for random number generator.
+        radius_quantile: Quantile for radius-based search.
+        min_k: Minimum neighbors for radius search.
+        max_k: Maximum neighbors for radius search.
+        window_steps: Number of past steps to search.
+
+    Returns:
+        A dictionary of prediction results.
+    """
     if Y.shape[0] < 2:
         return {
             "gain": 0.0,
@@ -265,6 +361,22 @@ def _prediction_gain_y_local_delta(
     max_k: int = 25,
     window_steps: int | None = None,
 ) -> dict[str, float]:
+    """Compute prediction gain for state differences using local linear maps.
+
+    Args:
+        Y: Observed feature matrix.
+        k_neighbors: Number of neighbors.
+        ridge_lambda: Regularization parameter.
+        neighbor_strategy: Strategy for finding neighbors.
+        random_seed: Seed for random number generator.
+        radius_quantile: Quantile for radius-based search.
+        min_k: Minimum neighbors for radius search.
+        max_k: Maximum neighbors for radius search.
+        window_steps: Number of past steps to search.
+
+    Returns:
+        A dictionary of prediction results.
+    """
     if Y.shape[0] < 2:
         return {
             "gain": 0.0,
@@ -322,6 +434,15 @@ def _prediction_gain_y_local_delta(
 def _prediction_gain_y_global(
     Y: np.ndarray, *, ridge_lambda: float
 ) -> dict[str, float]:
+    """Compute prediction gain using a global linear model on observations.
+
+    Args:
+        Y: Observed feature matrix.
+        ridge_lambda: Regularization parameter.
+
+    Returns:
+        A dictionary containing gain and MSE values.
+    """
     if Y.shape[0] < 2:
         return {"gain": 0.0, "mse_model": 0.0, "mse_baseline": 0.0}
     Xn = Y[:-1]
@@ -339,6 +460,16 @@ def _prediction_gain_y_global(
 
 
 def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> BenchmarkResult:
+    """Run the Golden A benchmark.
+
+    Args:
+        bench: Benchmark specification from manifest.
+        out_dir: Directory for storing output files.
+        smoke: Whether to run in smoke test mode.
+
+    Returns:
+        The benchmark results.
+    """
     preset = Path(bench["preset"])
     cfg = load_config(preset)
     if smoke:
