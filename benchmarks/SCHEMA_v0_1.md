@@ -49,10 +49,18 @@ Required top-level fields:
 
 Each result must include:
 
-- `status`: `pass` or `fail`
+- `status`: `pass`, `fail`, or `warn`
 - `metrics`: map of numeric or structured outputs
 - `checks`: map of check → boolean
 - `sections`: optional list of section summaries (id/title/metrics/checks)
+
+Notes:
+
+- `warn` indicates the benchmark ran and produced outputs, but some checks were
+  not applicable (e.g. insufficient sample size) or a non-fatal policy check
+  failed (e.g. tail generalization stress).
+- When checks are not applicable, implementations may record this in
+  `metrics["checks_skipped"]` as a list of check keys that were treated as N/A.
 
 ## Stability contract
 

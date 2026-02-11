@@ -287,6 +287,15 @@ def _build_sections(results: dict[str, BenchmarkResult]) -> list[dict[str, Any]]
                     "golden_a1.mnj_gate_fail_residual_fraction": metrics.get(
                         "mnj_gate_fail_residual_fraction"
                     ),
+                    "golden_a1.gate_agreement_abs_argmax_idx_diff_median": metrics.get(
+                        "gate_agreement_abs_argmax_idx_diff_median"
+                    ),
+                    "golden_a1.gate_agreement_corr_pearson_median": metrics.get(
+                        "gate_agreement_corr_pearson_median"
+                    ),
+                    "golden_a1.mnj_gate_trust_curve_rel_mse_baseline": metrics.get(
+                        "mnj_gate_trust_curve_rel_mse_baseline"
+                    ),
                     "golden_a1.mnj_gate_split_idx_fit": metrics.get(
                         "prediction_gain_segmented_mnj_gate_split_idx_fit"
                     ),

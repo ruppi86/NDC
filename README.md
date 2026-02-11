@@ -1,8 +1,6 @@
 # NDC Model
 
-This repository contains research notes and supporting artifacts for Noetic Diffusion Theory.
-
-NDC stands for Noetic Descriptor Correlate.
+ NDC (Noetic Descriptor Correlate) is a benchmarked framework for local capacity geometry in time series. It couples a low-dimensional state construction (MNPS) with local Jacobian estimation (MNJ) and auditable regime-switch localization via gated piecewise prediction. All claims are enforced via a claims matrix with explicit negative controls, honest evaluation windows (middle vs tail stress), and provenance logging that proves which signal drives each decision.
 
 
 ## NDC scaffold

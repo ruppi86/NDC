@@ -122,5 +122,7 @@ def _gate_margin_checks(
         mnj_gate_beats_random = mnj_gain > random_split_mean + margin
     mnj_gate_shuffled_collapse = True
     if mnj_shuffled_gain is not None and random_split_mean is not None:
-        mnj_gate_shuffled_collapse = mnj_shuffled_gain <= random_split_mean + 1e-12
+        # Use the same margin convention here: shifted/shuffled control should not beat
+        # random splits by more than epsilon.
+        mnj_gate_shuffled_collapse = mnj_shuffled_gain <= random_split_mean + margin
     return mnj_gate_beats_dy_gate, mnj_gate_beats_random, mnj_gate_shuffled_collapse

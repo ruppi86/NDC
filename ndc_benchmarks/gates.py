@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ndc_analysis.mnj import fit_local_jacobian, jacobian_effective_rank
+from ndc_analysis.mnj import fit_local_jacobian, jacobian_effective_rank, trust_curve
 from ndc_analysis.mnps import compute_mnps
 
 
@@ -44,6 +44,8 @@ def _gate_signal_mnj(
     Returns:
         A tuple containing (weighted_gate_signal, diagnostics_dict).
     """
+    trust_curve_thresholds = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+
     def _quantiles(values: np.ndarray) -> tuple[float, float, float]:
         vals = values[np.isfinite(values)]
         if vals.size == 0:
@@ -60,6 +62,8 @@ def _gate_signal_mnj(
     if Y.shape[0] == 0:
         return np.zeros(0, dtype=float), {
             "trust_coverage": 0.0,
+            "trust_curve_thresholds": trust_curve_thresholds,
+            "trust_curve_rel_mse_baseline": {},
             "trust_score_p10": 0.0,
             "trust_score_p50": 0.0,
             "trust_score_p90": 0.0,
@@ -133,6 +137,7 @@ def _gate_signal_mnj(
     trust_score = np.where(np.isfinite(g_raw), trust_score, 0.0)
     w_residual = np.where(np.isfinite(g_raw), w_residual, 0.0)
     g_weighted = g_raw * w_residual * trust_score
+    trust_curve_rel = trust_curve(mnj, thresholds=list(trust_curve_thresholds))
     diagnostics = {
         # Provenance: gating uses g_weighted = ||J|| * trust_score (soft),
         # while trust_coverage is a strict AND-mask.
@@ -153,6 +158,8 @@ def _gate_signal_mnj(
         "raw_mean": float(np.mean(g_raw[np.isfinite(g_raw)])) if np.any(np.isfinite(g_raw)) else 0.0,
         "raw_std": float(np.std(g_raw[np.isfinite(g_raw)])) if np.any(np.isfinite(g_raw)) else 0.0,
         "trust_coverage": float(np.mean(trust)),
+        "trust_curve_thresholds": trust_curve_thresholds,
+        "trust_curve_rel_mse_baseline": trust_curve_rel,
         "trust_score_p10": _quantiles(trust_score)[0],
         "trust_score_p50": _quantiles(trust_score)[1],
         "trust_score_p90": _quantiles(trust_score)[2],

@@ -1,0 +1,8 @@
+# Runtime dependencies (mirrors `pyproject.toml`)
+numpy>=1.24
+pydantic>=2.0
+pyyaml>=6.0
+h5py>=3.8
+
+# Dev / tests (optional)
+pytest>=7.0
