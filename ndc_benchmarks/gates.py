@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from ndc_analysis.mnj import fit_local_jacobian, jacobian_effective_rank, trust_curve
+from ndc_analysis.kcpd import compute_kcpd_gate
 from ndc_analysis.mnps import compute_mnps
 
 
@@ -76,6 +77,12 @@ def _gate_signal_mnj(
             "neighbors_p10": 0.0,
             "neighbors_p50": 0.0,
             "neighbors_p90": 0.0,
+            "neighbor_dist_median_p10": 0.0,
+            "neighbor_dist_median_p50": 0.0,
+            "neighbor_dist_median_p90": 0.0,
+            "neighbor_radius_p10": 0.0,
+            "neighbor_radius_p50": 0.0,
+            "neighbor_radius_p90": 0.0,
             "rank_p10": 0.0,
             "rank_p50": 0.0,
             "rank_p90": 0.0,
@@ -179,6 +186,12 @@ def _gate_signal_mnj(
         "neighbors_p10": _quantiles(mnj.neighborhood_sizes)[0],
         "neighbors_p50": _quantiles(mnj.neighborhood_sizes)[1],
         "neighbors_p90": _quantiles(mnj.neighborhood_sizes)[2],
+        "neighbor_dist_median_p10": _quantiles(mnj.neighbor_dist_median)[0],
+        "neighbor_dist_median_p50": _quantiles(mnj.neighbor_dist_median)[1],
+        "neighbor_dist_median_p90": _quantiles(mnj.neighbor_dist_median)[2],
+        "neighbor_radius_p10": _quantiles(mnj.neighbor_radius)[0],
+        "neighbor_radius_p50": _quantiles(mnj.neighbor_radius)[1],
+        "neighbor_radius_p90": _quantiles(mnj.neighbor_radius)[2],
         "rank_p10": _quantiles(eff_rank)[0],
         "rank_p50": _quantiles(eff_rank)[1],
         "rank_p90": _quantiles(eff_rank)[2],
@@ -192,3 +205,22 @@ def _gate_signal_mnj(
         "fail_neighbors_fraction": float(np.mean(~pass_neighbors)),
     }
     return g_weighted, diagnostics
+
+
+def _gate_signal_kcpd(
+    Y: np.ndarray,
+    *,
+    window_steps: int = 20,
+    kernel: str = "rbf",
+    sigma_policy: str = "median_heuristic_global",
+    bandwidth_sample_cap: int = 200,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Compute a KCPD-style MMD gate (delegates to analysis module)."""
+    return compute_kcpd_gate(
+        Y,
+        window_steps=window_steps,
+        kernel=kernel,
+        sigma_policy=sigma_policy,
+        normalize="zscore",
+        bandwidth_sample_cap=int(bandwidth_sample_cap),
+    )

@@ -21,6 +21,9 @@ benchmarks:
     oracle_opt_window_seconds: 0.5
     selection_fraction: 0.7
     mnj_gate_derivative_method: discrete_step
+    # KCPD baseline (fixed-kernel MMD gate in MNPS space)
+    kcpd_window_steps: 20
+    kcpd_sigma_subsample_max: 200
     k_neighbors_grid: [10, 15, 20]
     ridge_lambda_grid: [0.0001, 0.001, 0.01]
     derivative_methods: ["finite_diff"]
@@ -30,12 +33,23 @@ benchmarks:
       random_neighbors_max: 0.2
       grid_pass_rate_min: 0.6
       grid_leak_rate_max: 0.3
+      # dt_obs stability hygiene (diagnostic; start WARN-only)
+      gate_abs_argmax_diff_spread_frac_max: 0.8
+      mnj_argmax_idx_spread_frac_max: 0.8
+      mnj_trust_coverage_median_min: 0.001
+      mnj_cond_p50_p90_max: 200.0
+      gate_corr_pearson_median_over_dt_min: -0.3
     checks:
       segmented_random_split_beaten: honest_middle
       global_honest_tail_nonnegative: warn_only
       mnj_gate_beats_dy_gate: honest_middle
       mnj_gate_beats_random: honest_middle
       mnj_gate_shuffled_collapse: honest_middle
+      gate_dt_abs_argmax_diff_spread_ok: warn_only
+      gate_dt_mnj_argmax_spread_ok: warn_only
+      gate_dt_trust_coverage_nonzero: warn_only
+      gate_dt_cond_hygiene_ok: warn_only
+      gate_dt_corr_not_strongly_negative: warn_only
   - id: golden_b2_boundary
     type: golden_b2
     preset: NDC/config/presets/golden_confound_boundary_candidate.yaml

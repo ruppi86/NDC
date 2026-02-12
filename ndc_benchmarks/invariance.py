@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from NDC.config.schema import load_config
 from ndc_analysis.mnj import fit_local_jacobian, trust_mask
@@ -14,8 +15,49 @@ from .io import _apply_smoke, _run_and_load_obs
 from .types import BenchmarkResult
 
 
+def _invariance_dt_seed_worker(
+    *,
+    preset: str,
+    out_dir: str,
+    dt_obs: float,
+    seed: int,
+    smoke: bool,
+    metric_name: str,
+) -> dict[str, Any]:
+    cfg = load_config(Path(preset))
+    if smoke:
+        cfg = _apply_smoke(cfg)
+    cfg_s = cfg.model_copy(deep=True)
+    cfg_s.seed = int(seed)
+    cfg_s.time.dt_obs = float(dt_obs)
+    _, data_s = _run_and_load_obs(
+        cfg_s, Path(out_dir), f"stress_dt_{dt_obs}_seed_{seed}"
+    )
+    mnps_s = compute_mnps(data_s["Y"], k=min(3, data_s["Y"].shape[1]))
+    mnj = fit_local_jacobian(
+        mnps_s.X,
+        data_s["t"],
+        k_neighbors=min(15, max(2, len(data_s["t"]) - 1)),
+    )
+    if metric_name == "trust_coverage":
+        metric = float(np.mean(trust_mask(mnj, rel_mse_threshold=0.7)))
+    elif metric_name == "rel_mse_median":
+        metric = float(np.median(mnj.residual_rel_mse))
+    elif metric_name == "rel_mse_baseline_median":
+        metric = float(np.median(mnj.residual_rel_mse_baseline))
+    else:
+        raise ValueError(f"Unknown metric {metric_name}")
+    return {
+        "dt_obs": float(dt_obs),
+        "seed": int(seed),
+        "metric": float(metric),
+        "model_mse_median": float(np.median(mnj.residuals)),
+        "baseline_mse_median": float(np.median(mnj.baseline_mse)),
+    }
+
+
 def _invariance_stress(
-    bench: dict[str, Any], *, out_dir: Path, smoke: bool
+    bench: dict[str, Any], *, out_dir: Path, smoke: bool, jobs: int = 1
 ) -> BenchmarkResult:
     """Run the invariance stress benchmark.
 
@@ -38,6 +80,7 @@ def _invariance_stress(
     seeds = bench.get("seeds") or [cfg.seed]
     if smoke:
         seeds = seeds[:1]
+    jobs = max(1, int(jobs))
     metric_name = bench.get("metric", "trust_coverage")
     direction = bench.get("direction", "decrease")
     thresholds = bench.get("thresholds", {})
@@ -54,40 +97,43 @@ def _invariance_stress(
     baseline_mse_p90 = []
     per_dt_rows: list[dict[str, Any]] = []
     for dt_obs in dt_obs_vals:
-        dt_metrics = []
-        dt_model_mse = []
-        dt_baseline_mse = []
-        for seed in seeds:
-            cfg_s = cfg.model_copy(deep=True)
-            cfg_s.seed = int(seed)
-            cfg_s.time.dt_obs = float(dt_obs)
-            _, data_s = _run_and_load_obs(cfg_s, out_dir, f"stress_dt_{dt_obs}_seed_{seed}")
-            mnps_s = compute_mnps(data_s["Y"], k=min(3, data_s["Y"].shape[1]))
-            mnj = fit_local_jacobian(
-                mnps_s.X,
-                data_s["t"],
-                k_neighbors=min(15, max(2, len(data_s["t"]) - 1)),
-            )
-            if metric_name == "trust_coverage":
-                metric = float(np.mean(trust_mask(mnj, rel_mse_threshold=0.7)))
-            elif metric_name == "rel_mse_median":
-                metric = float(np.median(mnj.residual_rel_mse))
-            elif metric_name == "rel_mse_baseline_median":
-                metric = float(np.median(mnj.residual_rel_mse_baseline))
-            else:
-                raise ValueError(f"Unknown metric {metric_name}")
-            dt_metrics.append(float(metric))
-            dt_model_mse.append(float(np.median(mnj.residuals)))
-            dt_baseline_mse.append(float(np.median(mnj.baseline_mse)))
-            per_dt_rows.append(
-                {
-                    "dt_obs": float(dt_obs),
-                    "seed": int(seed),
-                    "metric": float(metric),
-                    "model_mse_median": float(np.median(mnj.residuals)),
-                    "baseline_mse_median": float(np.median(mnj.baseline_mse)),
-                }
-            )
+        dt_metrics: list[float] = []
+        dt_model_mse: list[float] = []
+        dt_baseline_mse: list[float] = []
+        if jobs == 1:
+            for seed in seeds:
+                row = _invariance_dt_seed_worker(
+                    preset=str(preset),
+                    out_dir=str(out_dir),
+                    dt_obs=float(dt_obs),
+                    seed=int(seed),
+                    smoke=bool(smoke),
+                    metric_name=str(metric_name),
+                )
+                dt_metrics.append(float(row["metric"]))
+                dt_model_mse.append(float(row["model_mse_median"]))
+                dt_baseline_mse.append(float(row["baseline_mse_median"]))
+                per_dt_rows.append(row)
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                futs = [
+                    ex.submit(
+                        _invariance_dt_seed_worker,
+                        preset=str(preset),
+                        out_dir=str(out_dir),
+                        dt_obs=float(dt_obs),
+                        seed=int(seed),
+                        smoke=bool(smoke),
+                        metric_name=str(metric_name),
+                    )
+                    for seed in seeds
+                ]
+                for fut in as_completed(futs):
+                    row = fut.result()
+                    dt_metrics.append(float(row["metric"]))
+                    dt_model_mse.append(float(row["model_mse_median"]))
+                    dt_baseline_mse.append(float(row["baseline_mse_median"]))
+                    per_dt_rows.append(row)
 
         vals = np.array(dt_metrics, dtype=float)
         mm = np.array(dt_model_mse, dtype=float)
@@ -110,6 +156,8 @@ def _invariance_stress(
     )
     checks = {"improvement_max": improvement <= improvement_max}
     status = "pass" if checks["improvement_max"] else "warn"
+    # Ensure deterministic output ordering for reproducibility across jobs.
+    per_dt_rows.sort(key=lambda r: (float(r.get("dt_obs", 0.0)), int(r.get("seed", 0))))
     metrics = {
         "dt_obs_sweep": dt_obs_vals,
         "seeds": seeds,

@@ -23,6 +23,11 @@ class MNJResult:
     baseline_mse: np.ndarray
     condition_numbers: np.ndarray
     neighborhood_sizes: np.ndarray
+    # Locality proxies (in embedded state space):
+    # - neighbor_dist_median: median distance to selected neighbors
+    # - neighbor_radius: max distance to selected neighbors (i.e., radius to k-th neighbor for kNN)
+    neighbor_dist_median: np.ndarray
+    neighbor_radius: np.ndarray
     excitation: np.ndarray
 
 
@@ -139,6 +144,8 @@ def _fit_local_jacobian_impl(
     baseline_mse = np.zeros(T, dtype=float)
     condition_numbers = np.zeros(T, dtype=float)
     neighborhood_sizes = np.full(T, k, dtype=int)
+    neighbor_dist_median = np.zeros(T, dtype=float)
+    neighbor_radius = np.zeros(T, dtype=float)
     excitation = np.zeros(T, dtype=float)
 
     rng = np.random.default_rng(random_seed)
@@ -159,6 +166,13 @@ def _fit_local_jacobian_impl(
             raise ValueError(f"Unknown neighbor_strategy: {neighbor_strategy}")
 
         D = X[idx] - X[i]
+        if D.size:
+            dists = np.sqrt(np.sum(D * D, axis=1))
+            neighbor_dist_median[i] = float(np.median(dists))
+            neighbor_radius[i] = float(np.max(dists))
+        else:
+            neighbor_dist_median[i] = 0.0
+            neighbor_radius[i] = 0.0
         # Jacobian model (with intercept): delta derivative ≈ J * delta state + b
         # Note: We do *not* ridge-regularize the intercept term.
         Y = dXdt[idx] - dXdt[i]
@@ -200,6 +214,8 @@ def _fit_local_jacobian_impl(
         baseline_mse=baseline_mse,
         condition_numbers=condition_numbers,
         neighborhood_sizes=neighborhood_sizes,
+        neighbor_dist_median=neighbor_dist_median,
+        neighbor_radius=neighbor_radius,
         excitation=excitation,
     )
 

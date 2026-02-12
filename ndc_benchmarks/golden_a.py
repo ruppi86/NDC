@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from NDC.config.schema import load_config
 from NDC.io.oracle_export import load_oracle
@@ -17,7 +20,7 @@ from ndc_analysis.mnps import (
     reconstruct_from_mnps,
 )
 
-from .gates import _gate_signal_dy, _gate_signal_mnj
+from .gates import _gate_signal_dy, _gate_signal_kcpd, _gate_signal_mnj
 from .io import _apply_smoke, _compute_mnps_mnj, _run_and_load_obs
 from .policies import (
     _gate_margin_checks,
@@ -34,6 +37,193 @@ from .split import (
     _split_idx_from_gate_argmax,
 )
 from .types import BenchmarkResult
+
+
+def _golden_a_dt_seed_worker(
+    *,
+    preset: str,
+    bench: dict[str, Any],
+    out_dir: str,
+    dt_obs: float,
+    seed: int,
+    smoke: bool,
+) -> dict[str, Any]:
+    """Run one (dt_obs, seed) job for Golden A sweep + stability row."""
+    cfg = load_config(Path(preset))
+    if smoke:
+        cfg = _apply_smoke(cfg)
+    t_switch = float(bench.get("t_switch", 3.0))
+
+    cfg_s = cfg.model_copy(deep=True)
+    cfg_s.seed = int(seed)
+    cfg_s.time.dt_obs = float(dt_obs)
+    cfg_s.output.save_oracle = True
+
+    out_path = Path(out_dir)
+    prefix = f"golden_a_dt_{dt_obs}_{seed}"
+    _, data_s = _run_and_load_obs(cfg_s, out_path, prefix)
+    t_s = data_s["t"]
+    oracle_s = out_path / f"{prefix}_oracle.h5"
+    metrics = _prediction_metrics(data_s["Y"], t_s, oracle_s)
+    gain = float(metrics["gain"])
+    ceiling = float(metrics["oracle_gain"] or 0.0)
+    cap = max(gain, 0.0) / max(ceiling, 1e-12)
+
+    # Gate argmax stability + agreement row
+    T_s = int(len(t_s))
+    selection_fraction_s = float(bench.get("selection_fraction", 0.7))
+    fit_T_s = max(2, int(round(selection_fraction_s * T_s)))
+    fit_T_s = min(fit_T_s, max(2, T_s - 1))
+    fit_Y_s = data_s["Y"][:fit_T_s]
+    t_fit_s = t_s[:fit_T_s]
+    dt_obs_s = float(np.median(np.diff(t_fit_s))) if t_fit_s.size > 1 else float(dt_obs)
+    min_seg_seconds_s = float(bench.get("min_seg_seconds", 1.5))
+    min_seg_steps_s = max(1, int(math.ceil(min_seg_seconds_s / max(dt_obs_s, 1e-12))))
+    dy_gate_s = _gate_signal_dy(fit_Y_s)
+    dy_argmax_s = _split_idx_from_gate_argmax(dy_gate_s, min_seg_steps=min_seg_steps_s)
+    k_neighbors_gate_s = min(15, max(2, fit_Y_s.shape[0] - 1))
+    mnj_gate_s, mnj_diag_s = _gate_signal_mnj(
+        fit_Y_s,
+        t_fit_s,
+        k_neighbors=k_neighbors_gate_s,
+        ridge_lambda=1e-3,
+        derivative_method=str(bench.get("mnj_gate_derivative_method", "discrete_step")),
+        random_seed=0,
+    )
+    mnj_argmax_s = _split_idx_from_gate_argmax(mnj_gate_s, min_seg_steps=min_seg_steps_s)
+    kcpd_window_steps_s = int(bench.get("kcpd_window_steps", 20))
+    kcpd_sigma_subsample_max_s = int(bench.get("kcpd_sigma_subsample_max", 200))
+    kcpd_gate_s, _kcpd_diag_s = _gate_signal_kcpd(
+        fit_Y_s,
+        window_steps=kcpd_window_steps_s,
+        kernel="rbf",
+        sigma_policy="median_heuristic_global",
+        bandwidth_sample_cap=kcpd_sigma_subsample_max_s,
+    )
+    kcpd_argmax_s = _split_idx_from_gate_argmax(kcpd_gate_s, min_seg_steps=min_seg_steps_s)
+    abs_diff_s = (
+        float(abs(int(mnj_argmax_s) - int(dy_argmax_s)))
+        if (mnj_argmax_s is not None and dy_argmax_s is not None)
+        else None
+    )
+    corr_s = _pearsonr(dy_gate_s.astype(float), mnj_gate_s.astype(float))
+    kcpd_abs_diff_vs_mnj_s = (
+        float(abs(int(kcpd_argmax_s) - int(mnj_argmax_s)))
+        if (kcpd_argmax_s is not None and mnj_argmax_s is not None)
+        else None
+    )
+    kcpd_abs_diff_vs_dy_s = (
+        float(abs(int(kcpd_argmax_s) - int(dy_argmax_s)))
+        if (kcpd_argmax_s is not None and dy_argmax_s is not None)
+        else None
+    )
+    kcpd_corr_vs_mnj_s = _pearsonr(kcpd_gate_s.astype(float), mnj_gate_s.astype(float))
+    kcpd_corr_vs_dy_s = _pearsonr(kcpd_gate_s.astype(float), dy_gate_s.astype(float))
+    stability_row = {
+        "dt_obs": float(dt_obs_s),
+        "seed": int(seed),
+        "fit_T": int(fit_T_s),
+        "min_seg_steps": int(min_seg_steps_s),
+        "dy_gate_argmax_idx_fit": None if dy_argmax_s is None else int(dy_argmax_s),
+        "mnj_gate_argmax_idx_fit": None if mnj_argmax_s is None else int(mnj_argmax_s),
+        "kcpd_gate_argmax_idx_fit": None if kcpd_argmax_s is None else int(kcpd_argmax_s),
+        "abs_argmax_idx_diff": abs_diff_s,
+        "gate_corr_pearson": float(corr_s),
+        "kcpd_abs_argmax_idx_diff_vs_mnj": kcpd_abs_diff_vs_mnj_s,
+        "kcpd_abs_argmax_idx_diff_vs_dy": kcpd_abs_diff_vs_dy_s,
+        "kcpd_gate_corr_vs_mnj": float(kcpd_corr_vs_mnj_s),
+        "kcpd_gate_corr_vs_dy": float(kcpd_corr_vs_dy_s),
+        "mnj_gate_trust_coverage": float(mnj_diag_s.get("trust_coverage", 0.0)),
+        "mnj_gate_cond_p50": float(mnj_diag_s.get("cond_p50", 0.0)),
+        "mnj_gate_neighbors_p50": float(mnj_diag_s.get("neighbors_p50", 0.0)),
+    }
+    return {
+        "dt_obs": float(dt_obs),
+        "seed": int(seed),
+        "gain": gain,
+        "cap": cap,
+        "stability_row": stability_row,
+    }
+
+
+def _golden_a_seed_worker(
+    *,
+    preset: str,
+    bench: dict[str, Any],
+    out_dir: str,
+    seed: int,
+) -> dict[str, float | int | None]:
+    """Run one seed job for A1 seed bundle (honest_middle)."""
+    cfg = load_config(Path(preset))
+    cfg_s = cfg.model_copy(deep=True)
+    cfg_s.seed = int(seed)
+    cfg_s.output.save_oracle = True
+    out_path = Path(out_dir)
+    prefix = f"golden_a_seed_{seed}"
+    _, data_seed = _run_and_load_obs(cfg_s, out_path, prefix)
+    oracle_seed = out_path / f"{prefix}_oracle.h5"
+    return {
+        "seed": int(seed),
+        **_a1_seed_metrics(
+            data_seed,
+            t=data_seed["t"],
+            bench=bench,
+            random_seed=int(seed),
+            oracle_path=oracle_seed,
+        ),
+    }
+
+
+def _golden_a_grid_cell_worker(
+    *,
+    X: np.ndarray,
+    t: np.ndarray,
+    t_switch: float,
+    method: str,
+    k_neighbors: int,
+    ridge_lambda: float,
+    effect_min: float,
+    shuf_ok: bool,
+    rand_ok: bool,
+) -> dict[str, Any]:
+    """Compute one MNJ sensitivity-grid cell (no IO)."""
+    mnj_grid = fit_local_jacobian(
+        X,
+        t,
+        k_neighbors=int(k_neighbors),
+        ridge_lambda=float(ridge_lambda),
+        derivative_method=str(method),
+        neighbor_strategy="knn",
+        random_seed=0,
+    )
+    traces_grid = np.trace(mnj_grid.J, axis1=1, axis2=2)
+    effect_grid = _cohens_d(traces_grid[t >= t_switch], traces_grid[t < t_switch])
+    pass_cell = (effect_grid >= effect_min) and shuf_ok and rand_ok
+    leak_cell = bool((effect_grid >= effect_min) and not (shuf_ok and rand_ok))
+
+    # Random-neighbor cell (diagnostic only; currently not used for checks)
+    mnj_rand_grid = fit_local_jacobian(
+        X,
+        t,
+        k_neighbors=int(k_neighbors),
+        ridge_lambda=float(ridge_lambda),
+        derivative_method=str(method),
+        neighbor_strategy="random",
+        random_seed=0,
+    )
+    traces_rand_grid = np.trace(mnj_rand_grid.J, axis1=1, axis2=2)
+    effect_rand_grid = _cohens_d(
+        traces_rand_grid[t >= t_switch], traces_rand_grid[t < t_switch]
+    )
+    return {
+        "method": str(method),
+        "k_neighbors": int(k_neighbors),
+        "ridge_lambda": float(ridge_lambda),
+        "effect_grid": float(effect_grid),
+        "effect_rand_grid": float(effect_rand_grid),
+        "pass_cell": bool(pass_cell),
+        "leak_cell": bool(leak_cell),
+    }
 
 
 def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
@@ -176,6 +366,7 @@ def _a1_seed_metrics(
     t: np.ndarray,
     bench: dict[str, Any],
     random_seed: int = 0,
+    oracle_path: Path | None = None,
 ) -> dict[str, float | int | None]:
     """Compute a small, seed-level Golden A1 metric bundle (honest_middle).
 
@@ -305,9 +496,75 @@ def _a1_seed_metrics(
                 )["gain"]
             )
 
+    # KCPD baseline (two-window MMD gate in MNPS space; fixed RBF kernel)
+    prediction_gain_segmented_kcpd_gate_honest_middle = None
+    prediction_gain_segmented_kcpd_gate_shuffled_honest_middle = None
+    kcpd_gate_shuffled_method = "circular_shift"
+    kcpd_gate_shuffled_shift = None
+    kcpd_kernel = "rbf"
+    kcpd_sigma_policy = "median_heuristic_global"
+    kcpd_window_steps = int(bench.get("kcpd_window_steps", 20))
+    kcpd_sigma_subsample_max = int(bench.get("kcpd_sigma_subsample_max", 200))
+    kcpd_gate, kcpd_diag = _gate_signal_kcpd(
+        fit_Y,
+        window_steps=kcpd_window_steps,
+        kernel=kcpd_kernel,
+        sigma_policy=kcpd_sigma_policy,
+        bandwidth_sample_cap=kcpd_sigma_subsample_max,
+    )
+    kcpd_idx = (
+        _split_idx_from_gate_argmax(kcpd_gate, min_seg_steps=min_seg_steps)
+        if float(kcpd_diag.get("kcpd_computed_steps", 0.0)) > 0.0
+        else None
+    )
+    if (not honest_middle_skipped) and (kcpd_idx is not None):
+        split_idx_eval = int(kcpd_idx) - eval_mid_start
+        prediction_gain_segmented_kcpd_gate_honest_middle = float(
+            _segmented_global_gain_from_split(
+                fit_Y=fit_Y,
+                eval_Y=eval_Y_middle,
+                split_idx_fit=int(kcpd_idx),
+                split_idx_eval=split_idx_eval,
+                ridge_lambda=1e-3,
+            )["gain"]
+        )
+    if float(kcpd_diag.get("kcpd_computed_steps", 0.0)) > 0.0 and kcpd_gate.size > 0:
+        # Circular-shift control: preserve local structure, destroy timing alignment.
+        n = int(kcpd_gate.size)
+        if n <= 1:
+            shift = 0
+        elif n > 2 * int(min_seg_steps):
+            shift = int(rng.integers(int(min_seg_steps), n - int(min_seg_steps) + 1))
+        else:
+            shift = int(rng.integers(1, n))
+        kcpd_gate_shuffled_shift = int(shift)
+        g_shuf_k = np.roll(kcpd_gate, shift=shift)
+        s_shuf_k = _split_idx_from_gate_argmax(g_shuf_k, min_seg_steps=min_seg_steps)
+        if (not honest_middle_skipped) and (s_shuf_k is not None):
+            split_idx_eval = int(s_shuf_k) - eval_mid_start
+            prediction_gain_segmented_kcpd_gate_shuffled_honest_middle = float(
+                _segmented_global_gain_from_split(
+                    fit_Y=fit_Y,
+                    eval_Y=eval_Y_middle,
+                    split_idx_fit=int(s_shuf_k),
+                    split_idx_eval=split_idx_eval,
+                    ridge_lambda=1e-3,
+                )["gain"]
+            )
+
     abs_argmax_diff = (
         int(abs(int(mnj_idx) - int(dy_idx)))
         if (mnj_idx is not None and dy_idx is not None)
+        else None
+    )
+    kcpd_abs_argmax_diff_vs_mnj = (
+        int(abs(int(kcpd_idx) - int(mnj_idx)))
+        if (kcpd_idx is not None and mnj_idx is not None)
+        else None
+    )
+    kcpd_abs_argmax_diff_vs_dy = (
+        int(abs(int(kcpd_idx) - int(dy_idx)))
+        if (kcpd_idx is not None and dy_idx is not None)
         else None
     )
     corr = float(_pearsonr(dy_gate.astype(float), mnj_gate.astype(float)))
@@ -333,26 +590,218 @@ def _a1_seed_metrics(
         if ("s_shuf" in locals() and s_shuf is not None and oracle_true_split_idx_fit is not None)
         else None
     )
+    kcpd_abs_err_vs_oracle = (
+        int(abs(int(kcpd_idx) - int(oracle_true_split_idx_fit)))
+        if (kcpd_idx is not None and oracle_true_split_idx_fit is not None)
+        else None
+    )
+    kcpd_shuf_abs_err_vs_oracle = (
+        int(abs(int(s_shuf_k) - int(oracle_true_split_idx_fit)))
+        if ("s_shuf_k" in locals() and s_shuf_k is not None and oracle_true_split_idx_fit is not None)
+        else None
+    )
+
+    kcpd_corr_vs_mnj = float(_pearsonr(kcpd_gate.astype(float), mnj_gate.astype(float)))
+    kcpd_corr_vs_dy = float(_pearsonr(kcpd_gate.astype(float), dy_gate.astype(float)))
+
+    # Jacobian alignment vs oracle (project oracle A_true into MNPS space)
+    jacobian_align_cos_pre_p50 = None
+    jacobian_align_cos_post_p50 = None
+    jacobian_align_cos_post_minus_pre_p50 = None
+    jacobian_align_drop_argmax_abs_err_vs_oracle = None
+    jacobian_align_drop_vs_gate_corr_pearson = None
+    try:
+        if oracle_path is not None and oracle_path.exists():
+            oracle_data, oracle_meta = load_oracle(oracle_path)
+            observer_tier = oracle_meta.get("extra", {}).get("observer_tier")
+            if "A_true" in oracle_data and observer_tier in {"oracle", "obs-0"}:
+                # MNPS basis and normalization stats for the fit window
+                mnps_fit, mnps_diag = compute_mnps_with_diagnostics(
+                    fit_Y, k=min(3, fit_Y.shape[1]), normalize="zscore"
+                )
+                comps = mnps_diag.embedder.axes[: mnps_fit.X.shape[1], :]  # (k, D)
+                std = mnps_diag.normalizer.std.reshape(-1)  # (D,)
+                std = np.where(np.isfinite(std) & (std != 0.0), std, 1.0)
+
+                # Align oracle A_true to observation timebase (fit window)
+                A_true = _align_oracle_matrix(oracle_data["t"], oracle_data["A_true"], t[:fit_T])
+                # Convert oracle Jacobian from raw Y units into z-scored coordinates:
+                # A_norm = diag(1/std) @ A_raw @ diag(std) -> A_norm_ij = A_raw_ij * (std_j / std_i)
+                scale = std[None, :] / std[:, None]
+                A_norm = A_true * scale[None, :, :]
+
+                # Project to MNPS coordinates: A_x = comps @ A_norm @ comps^T
+                A_x = np.einsum("kd,tdm,mc->tkc", comps, A_norm, comps.T, optimize=True)
+
+                # Estimate MNJ Jacobians in MNPS on the same window/config as gating
+                mnj_fit = fit_local_jacobian(
+                    mnps_fit.X,
+                    t[:fit_T],
+                    k_neighbors=k_neighbors_gate,
+                    ridge_lambda=1e-3,
+                    derivative_method=str(bench.get("mnj_gate_derivative_method", "discrete_step")),
+                    neighbor_strategy="knn",
+                    random_seed=0,
+                )
+
+                # Scale oracle Jacobian if MNJ used discrete steps (J_est ~ A * dt)
+                dt = np.diff(t[:fit_T])
+                dt = np.append(dt, dt[-1] if dt.size else 1.0)
+                if str(bench.get("mnj_gate_derivative_method", "discrete_step")) == "discrete_step":
+                    A_cmp = A_x * dt[:, None, None]
+                else:
+                    A_cmp = A_x
+
+                # Cosine similarity per time between vec(J_est) and vec(A_cmp)
+                Jv = mnj_fit.J.reshape((fit_T, -1))
+                Av = A_cmp.reshape((fit_T, -1))
+                num = np.sum(Jv * Av, axis=1)
+                den = (np.linalg.norm(Jv, axis=1) * np.linalg.norm(Av, axis=1)) + 1e-12
+                cos = np.where(den > 0, num / den, 0.0)
+                cos = np.where(np.isfinite(cos), cos, 0.0)
+
+                pre = cos[t[:fit_T] < t_switch]
+                post = cos[t[:fit_T] >= t_switch]
+                if pre.size:
+                    jacobian_align_cos_pre_p50 = float(np.median(pre))
+                if post.size:
+                    jacobian_align_cos_post_p50 = float(np.median(post))
+                if (jacobian_align_cos_pre_p50 is not None) and (jacobian_align_cos_post_p50 is not None):
+                    jacobian_align_cos_post_minus_pre_p50 = float(
+                        jacobian_align_cos_post_p50 - jacobian_align_cos_pre_p50
+                    )
+
+                # Does alignment "drop" localize the switch?
+                drop = 1.0 - cos
+                drop_idx = _split_idx_from_gate_argmax(drop.astype(float), min_seg_steps=min_seg_steps)
+                if (drop_idx is not None) and (oracle_true_split_idx_fit is not None):
+                    jacobian_align_drop_argmax_abs_err_vs_oracle = int(
+                        abs(int(drop_idx) - int(oracle_true_split_idx_fit))
+                    )
+
+                # Coupling between MNJ gate and alignment drop (fit window)
+                jacobian_align_drop_vs_gate_corr_pearson = float(
+                    _pearsonr(mnj_gate.astype(float), drop.astype(float))
+                )
+    except Exception:
+        # Alignment is supplementary; failure should not break the benchmark.
+        pass
+
+    # kNN sensitivity summary (over k_neighbors_grid) + locality proxy
+    k_grid = bench.get("k_neighbors_grid", [10, 15, 20])
+    k_grid_gain_summary = {"median": None, "p10": None, "p90": None}
+    k_grid_argmax_summary = {"median": None, "p10": None, "p90": None}
+    k_grid_cond_p50_summary = {"median": None, "p10": None, "p90": None}
+    k_grid_neighbor_radius_p50_summary = {"median": None, "p10": None, "p90": None}
+    k_grid_neighbor_dist_median_p50_summary = {"median": None, "p10": None, "p90": None}
+    if (not honest_middle_skipped) and k_grid:
+        gains_over_k: list[float | None] = []
+        argmax_over_k: list[float | None] = []
+        cond_p50_over_k: list[float | None] = []
+        radius_p50_over_k: list[float | None] = []
+        dist_med_p50_over_k: list[float | None] = []
+        for k_nbr in k_grid:
+            gate_k, diag_k = _gate_signal_mnj(
+                fit_Y,
+                t[:fit_T],
+                k_neighbors=int(k_nbr),
+                ridge_lambda=1e-3,
+                derivative_method=str(bench.get("mnj_gate_derivative_method", "discrete_step")),
+                random_seed=0,
+            )
+            idx_k = _split_idx_from_gate_argmax(gate_k, min_seg_steps=min_seg_steps)
+            argmax_over_k.append(None if idx_k is None else float(idx_k))
+            cond_p50_over_k.append(float(diag_k.get("cond_p50", 0.0)))
+            radius_p50_over_k.append(float(diag_k.get("neighbor_radius_p50", 0.0)))
+            dist_med_p50_over_k.append(float(diag_k.get("neighbor_dist_median_p50", 0.0)))
+            if idx_k is None:
+                gains_over_k.append(None)
+            else:
+                split_idx_eval = int(idx_k) - eval_mid_start
+                gains_over_k.append(
+                    float(
+                        _segmented_global_gain_from_split(
+                            fit_Y=fit_Y,
+                            eval_Y=eval_Y_middle,
+                            split_idx_fit=int(idx_k),
+                            split_idx_eval=split_idx_eval,
+                            ridge_lambda=1e-3,
+                        )["gain"]
+                    )
+                )
+        k_grid_gain_summary = _quantile_summary(gains_over_k)
+        k_grid_argmax_summary = _quantile_summary(argmax_over_k)
+        k_grid_cond_p50_summary = _quantile_summary(cond_p50_over_k)
+        k_grid_neighbor_radius_p50_summary = _quantile_summary(radius_p50_over_k)
+        k_grid_neighbor_dist_median_p50_summary = _quantile_summary(dist_med_p50_over_k)
     return {
         "fit_T": int(fit_T),
         "min_seg_steps": int(min_seg_steps),
         "dy_argmax_idx": None if dy_idx is None else int(dy_idx),
         "mnj_argmax_idx": None if mnj_idx is None else int(mnj_idx),
+        "kcpd_argmax_idx": None if kcpd_idx is None else int(kcpd_idx),
         "abs_argmax_idx_diff": None if abs_argmax_diff is None else int(abs_argmax_diff),
+        "abs_argmax_idx_diff_kcpd_vs_mnj": None
+        if kcpd_abs_argmax_diff_vs_mnj is None
+        else int(kcpd_abs_argmax_diff_vs_mnj),
+        "abs_argmax_idx_diff_kcpd_vs_dy": None
+        if kcpd_abs_argmax_diff_vs_dy is None
+        else int(kcpd_abs_argmax_diff_vs_dy),
         "gate_corr_pearson": float(corr),
         "mnj_gate_trust_coverage": float(mnj_diag.get("trust_coverage", 0.0)),
+        # Locality proxy for the default k used in gating
+        "mnj_gate_neighbor_radius_p50": float(mnj_diag.get("neighbor_radius_p50", 0.0)),
+        "mnj_gate_neighbor_dist_median_p50": float(mnj_diag.get("neighbor_dist_median_p50", 0.0)),
+        # k sensitivity summaries (within-seed; quantiles over k)
+        "mnj_k_grid": ",".join([str(int(x)) for x in k_grid]) if k_grid else "",
+        "mnj_k_grid_gain_over_k_median": k_grid_gain_summary["median"],
+        "mnj_k_grid_gain_over_k_p10": k_grid_gain_summary["p10"],
+        "mnj_k_grid_gain_over_k_p90": k_grid_gain_summary["p90"],
+        "mnj_k_grid_argmax_idx_over_k_median": k_grid_argmax_summary["median"],
+        "mnj_k_grid_argmax_idx_over_k_p10": k_grid_argmax_summary["p10"],
+        "mnj_k_grid_argmax_idx_over_k_p90": k_grid_argmax_summary["p90"],
+        "mnj_k_grid_cond_p50_over_k_median": k_grid_cond_p50_summary["median"],
+        "mnj_k_grid_cond_p50_over_k_p10": k_grid_cond_p50_summary["p10"],
+        "mnj_k_grid_cond_p50_over_k_p90": k_grid_cond_p50_summary["p90"],
+        "mnj_k_grid_neighbor_radius_p50_over_k_median": k_grid_neighbor_radius_p50_summary["median"],
+        "mnj_k_grid_neighbor_radius_p50_over_k_p10": k_grid_neighbor_radius_p50_summary["p10"],
+        "mnj_k_grid_neighbor_radius_p50_over_k_p90": k_grid_neighbor_radius_p50_summary["p90"],
+        "mnj_k_grid_neighbor_dist_median_p50_over_k_median": k_grid_neighbor_dist_median_p50_summary["median"],
+        "mnj_k_grid_neighbor_dist_median_p50_over_k_p10": k_grid_neighbor_dist_median_p50_summary["p10"],
+        "mnj_k_grid_neighbor_dist_median_p50_over_k_p90": k_grid_neighbor_dist_median_p50_summary["p90"],
         "mnj_gate_shuffled_method": mnj_gate_shuffled_method,
         "mnj_gate_shuffled_shift": mnj_gate_shuffled_shift,
+        # KCPD baseline provenance
+        "kcpd_kernel": kcpd_kernel,
+        "kcpd_sigma_policy": kcpd_sigma_policy,
+        "kcpd_window_steps": int(kcpd_window_steps),
+        "kcpd_sigma_subsample_max": int(kcpd_sigma_subsample_max),
+        "kcpd_sigma": float(kcpd_diag.get("kcpd_sigma", 0.0)),
+        "kcpd_computed_steps": int(kcpd_diag.get("kcpd_computed_steps", 0.0)),
+        "kcpd_gate_shuffled_method": kcpd_gate_shuffled_method,
+        "kcpd_gate_shuffled_shift": kcpd_gate_shuffled_shift,
         "oracle_true_split_idx_fit": oracle_true_split_idx_fit,
+        # Jacobian alignment (supplementary, oracle-only)
+        "jacobian_align_cos_pre_p50": jacobian_align_cos_pre_p50,
+        "jacobian_align_cos_post_p50": jacobian_align_cos_post_p50,
+        "jacobian_align_cos_post_minus_pre_p50": jacobian_align_cos_post_minus_pre_p50,
+        "jacobian_align_drop_argmax_abs_err_vs_oracle": jacobian_align_drop_argmax_abs_err_vs_oracle,
+        "jacobian_align_drop_vs_gate_corr_pearson": jacobian_align_drop_vs_gate_corr_pearson,
         "dy_gate_argmax_abs_err_vs_oracle": dy_abs_err_vs_oracle,
         "mnj_gate_argmax_abs_err_vs_oracle": mnj_abs_err_vs_oracle,
         "mnj_gate_shuffled_argmax_abs_err_vs_oracle": shuf_abs_err_vs_oracle,
+        "kcpd_gate_argmax_abs_err_vs_oracle": kcpd_abs_err_vs_oracle,
+        "kcpd_gate_shuffled_argmax_abs_err_vs_oracle": kcpd_shuf_abs_err_vs_oracle,
+        "kcpd_gate_corr_vs_mnj": float(kcpd_corr_vs_mnj),
+        "kcpd_gate_corr_vs_dy": float(kcpd_corr_vs_dy),
         "prediction_gain_data_segmented_global_honest_middle": prediction_gain_data_segmented_global_honest_middle,
         "prediction_gain_segmented_random_split_honest_middle_mean": random_split_honest_middle_mean,
         "prediction_gain_segmented_random_split_honest_middle_std": random_split_honest_middle_std,
         "prediction_gain_segmented_dy_gate_honest_middle": prediction_gain_segmented_dy_gate_honest_middle,
         "prediction_gain_segmented_mnj_gate_honest_middle": prediction_gain_segmented_mnj_gate_honest_middle,
         "prediction_gain_segmented_mnj_gate_shuffled_honest_middle": prediction_gain_segmented_mnj_gate_shuffled_honest_middle,
+        "prediction_gain_segmented_kcpd_gate_honest_middle": prediction_gain_segmented_kcpd_gate_honest_middle,
+        "prediction_gain_segmented_kcpd_gate_shuffled_honest_middle": prediction_gain_segmented_kcpd_gate_shuffled_honest_middle,
     }
 
 
@@ -677,7 +1126,9 @@ def _prediction_gain_y_global(
     return {"gain": gain, "mse_model": mse_model, "mse_baseline": mse_baseline}
 
 
-def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> BenchmarkResult:
+def _golden_a(
+    bench: dict[str, Any], *, out_dir: Path, smoke: bool, jobs: int = 1
+) -> BenchmarkResult:
     """Run the Golden A benchmark.
 
     Args:
@@ -757,81 +1208,61 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
     seeds = bench.get("seeds") or [cfg.seed]
     if smoke:
         seeds = seeds[:1]
+    jobs = max(1, int(jobs))
     sweep_effects = []
     sweep_caps = []
     gate_stability_rows: list[dict[str, float | int | None]] = []
     gate_agreement_abs_idx_diffs: list[float] = []
     gate_agreement_corrs: list[float] = []
+    # dt_obs sweep: parallelize across seeds (processes) when enabled.
     for dt_obs in dt_obs_vals:
-        gains = []
-        caps = []
-        for seed in seeds:
-            cfg_s = cfg.model_copy(deep=True)
-            cfg_s.seed = int(seed)
-            cfg_s.time.dt_obs = float(dt_obs)
-            cfg_s.output.save_oracle = True
-            _, data_s = _run_and_load_obs(cfg_s, out_dir, f"golden_a_dt_{dt_obs}_{seed}")
-            t_s = data_s["t"]
-            oracle_s = out_dir / f"golden_a_dt_{dt_obs}_{seed}_oracle.h5"
-            metrics = _prediction_metrics(data_s["Y"], t_s, oracle_s)
-            gain = float(metrics["gain"])
-            ceiling = float(metrics["oracle_gain"] or 0.0)
-            cap = max(gain, 0.0) / max(ceiling, 1e-12)
-            gains.append(gain)
-            caps.append(cap)
-
-            # Gate argmax stability + agreement (characterization only; no tuning)
-            T_s = int(len(t_s))
-            selection_fraction_s = float(bench.get("selection_fraction", 0.7))
-            fit_T_s = max(2, int(round(selection_fraction_s * T_s)))
-            fit_T_s = min(fit_T_s, max(2, T_s - 1))
-            fit_Y_s = data_s["Y"][:fit_T_s]
-            t_fit_s = t_s[:fit_T_s]
-            dt_obs_s = float(np.median(np.diff(t_fit_s))) if t_fit_s.size > 1 else float(dt_obs)
-            min_seg_seconds_s = float(bench.get("min_seg_seconds", 1.5))
-            min_seg_steps_s = max(
-                1, int(math.ceil(min_seg_seconds_s / max(dt_obs_s, 1e-12)))
-            )
-            dy_gate_s = _gate_signal_dy(fit_Y_s)
-            dy_argmax_s = _split_idx_from_gate_argmax(
-                dy_gate_s, min_seg_steps=min_seg_steps_s
-            )
-            k_neighbors_gate_s = min(15, max(2, fit_Y_s.shape[0] - 1))
-            mnj_gate_s, mnj_diag_s = _gate_signal_mnj(
-                fit_Y_s,
-                t_fit_s,
-                k_neighbors=k_neighbors_gate_s,
-                ridge_lambda=1e-3,
-                derivative_method=str(bench.get("mnj_gate_derivative_method", "discrete_step")),
-                random_seed=0,
-            )
-            mnj_argmax_s = _split_idx_from_gate_argmax(
-                mnj_gate_s, min_seg_steps=min_seg_steps_s
-            )
-            abs_diff_s = (
-                float(abs(int(mnj_argmax_s) - int(dy_argmax_s)))
-                if (mnj_argmax_s is not None and dy_argmax_s is not None)
-                else None
-            )
-            corr_s = _pearsonr(dy_gate_s.astype(float), mnj_gate_s.astype(float))
-            gate_stability_rows.append(
-                {
-                    "dt_obs": float(dt_obs_s),
-                    "seed": int(seed),
-                    "fit_T": int(fit_T_s),
-                    "min_seg_steps": int(min_seg_steps_s),
-                    "dy_gate_argmax_idx_fit": None if dy_argmax_s is None else int(dy_argmax_s),
-                    "mnj_gate_argmax_idx_fit": None if mnj_argmax_s is None else int(mnj_argmax_s),
-                    "abs_argmax_idx_diff": abs_diff_s,
-                    "gate_corr_pearson": float(corr_s),
-                    "mnj_gate_trust_coverage": float(mnj_diag_s.get("trust_coverage", 0.0)),
-                    "mnj_gate_cond_p50": float(mnj_diag_s.get("cond_p50", 0.0)),
-                    "mnj_gate_neighbors_p50": float(mnj_diag_s.get("neighbors_p50", 0.0)),
-                }
-            )
-            if abs_diff_s is not None:
-                gate_agreement_abs_idx_diffs.append(float(abs_diff_s))
-            gate_agreement_corrs.append(float(corr_s))
+        gains: list[float] = []
+        caps: list[float] = []
+        if jobs == 1:
+            for seed in seeds:
+                if os.environ.get("NDC_BENCH_PROGRESS", "0") == "1":
+                    print(
+                        f"[golden_a] dt_obs={dt_obs} seed={seed} starting run",
+                        flush=True,
+                    )
+                out = _golden_a_dt_seed_worker(
+                    preset=str(preset),
+                    bench=bench,
+                    out_dir=str(out_dir),
+                    dt_obs=float(dt_obs),
+                    seed=int(seed),
+                    smoke=bool(smoke),
+                )
+                gains.append(float(out["gain"]))
+                caps.append(float(out["cap"]))
+                row = out["stability_row"]
+                gate_stability_rows.append(row)
+                if row.get("abs_argmax_idx_diff") is not None:
+                    gate_agreement_abs_idx_diffs.append(float(row["abs_argmax_idx_diff"]))
+                gate_agreement_corrs.append(float(row["gate_corr_pearson"]))
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                futs = [
+                    ex.submit(
+                        _golden_a_dt_seed_worker,
+                        preset=str(preset),
+                        bench=bench,
+                        out_dir=str(out_dir),
+                        dt_obs=float(dt_obs),
+                        seed=int(seed),
+                        smoke=bool(smoke),
+                    )
+                    for seed in seeds
+                ]
+                for fut in as_completed(futs):
+                    out = fut.result()
+                    gains.append(float(out["gain"]))
+                    caps.append(float(out["cap"]))
+                    row = out["stability_row"]
+                    gate_stability_rows.append(row)
+                    if row.get("abs_argmax_idx_diff") is not None:
+                        gate_agreement_abs_idx_diffs.append(float(row["abs_argmax_idx_diff"]))
+                    gate_agreement_corrs.append(float(row["gate_corr_pearson"]))
         sweep_effects.append(float(np.median(gains)))
         sweep_caps.append(float(np.median(caps)))
 
@@ -849,6 +1280,162 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
     shuffle_max = float(thresholds.get("time_shuffle_max", 1.0))
     random_max = float(thresholds.get("random_neighbors_max", 1.0))
 
+    # dt_obs × seed gate stability aggregation (reviewer hygiene; no tuning)
+    def _vals_for_dt(dt: float) -> list[dict[str, float | int | None]]:
+        # Compare in a numerically stable way
+        return [
+            row
+            for row in gate_stability_rows
+            if row.get("dt_obs") is not None
+            and abs(float(row["dt_obs"]) - float(dt)) <= 1e-9
+        ]
+
+    def _finite_floats(rows: list[dict[str, float | int | None]], key: str) -> list[float]:
+        out: list[float] = []
+        for r in rows:
+            v = r.get(key)
+            if v is None:
+                continue
+            fv = float(v)
+            if np.isfinite(fv):
+                out.append(fv)
+        return out
+
+    def _q(rows: list[dict[str, float | int | None]], key: str) -> tuple[float | None, float | None, float | None]:
+        vals = _finite_floats(rows, key)
+        if not vals:
+            return None, None, None
+        arr = np.array(vals, dtype=float)
+        p10, p50, p90 = np.percentile(arr, [10, 50, 90])
+        return float(p10), float(p50), float(p90)
+
+    gate_stability_dt_rows: list[dict[str, float | int | None]] = []
+    abs_diff_spread_frac_over_dt: list[float] = []
+    mnj_argmax_spread_frac_over_dt: list[float] = []
+    kcpd_argmax_spread_frac_over_dt: list[float] = []
+    corr_median_over_dt: list[float] = []
+    trust_median_over_dt: list[float] = []
+    cond_p90_over_dt: list[float] = []
+    kcpd_corr_vs_mnj_median_over_dt: list[float] = []
+    for dt in dt_obs_vals:
+        rows_dt = _vals_for_dt(float(dt))
+        if not rows_dt:
+            continue
+
+        # min_seg_steps is logged per row; treat as constant within dt, summarize robustly.
+        min_seg_steps_vals = _finite_floats(rows_dt, "min_seg_steps")
+        min_seg_steps_dt = int(round(np.median(min_seg_steps_vals))) if min_seg_steps_vals else 0
+
+        dy_p10, dy_p50, dy_p90 = _q(rows_dt, "dy_gate_argmax_idx_fit")
+        mnj_p10, mnj_p50, mnj_p90 = _q(rows_dt, "mnj_gate_argmax_idx_fit")
+        kcpd_p10, kcpd_p50, kcpd_p90 = _q(rows_dt, "kcpd_gate_argmax_idx_fit")
+        abs_p10, abs_p50, abs_p90 = _q(rows_dt, "abs_argmax_idx_diff")
+        corr_p10, corr_p50, corr_p90 = _q(rows_dt, "gate_corr_pearson")
+        kcpd_corr_mnj_p10, kcpd_corr_mnj_p50, kcpd_corr_mnj_p90 = _q(rows_dt, "kcpd_gate_corr_vs_mnj")
+        kcpd_abs_mnj_p10, kcpd_abs_mnj_p50, kcpd_abs_mnj_p90 = _q(rows_dt, "kcpd_abs_argmax_idx_diff_vs_mnj")
+        trust_p10, trust_p50, trust_p90 = _q(rows_dt, "mnj_gate_trust_coverage")
+        cond_p10, cond_p50, cond_p90 = _q(rows_dt, "mnj_gate_cond_p50")
+        nbr_p10, nbr_p50, nbr_p90 = _q(rows_dt, "mnj_gate_neighbors_p50")
+
+        abs_spread = (abs_p90 - abs_p10) if (abs_p10 is not None and abs_p90 is not None) else None
+        mnj_spread = (mnj_p90 - mnj_p10) if (mnj_p10 is not None and mnj_p90 is not None) else None
+        kcpd_spread = (
+            (kcpd_p90 - kcpd_p10) if (kcpd_p10 is not None and kcpd_p90 is not None) else None
+        )
+        abs_spread_frac = (
+            (float(abs_spread) / float(min_seg_steps_dt))
+            if (abs_spread is not None and min_seg_steps_dt > 0)
+            else None
+        )
+        mnj_spread_frac = (
+            (float(mnj_spread) / float(min_seg_steps_dt))
+            if (mnj_spread is not None and min_seg_steps_dt > 0)
+            else None
+        )
+        kcpd_spread_frac = (
+            (float(kcpd_spread) / float(min_seg_steps_dt))
+            if (kcpd_spread is not None and min_seg_steps_dt > 0)
+            else None
+        )
+
+        gate_stability_dt_rows.append(
+            {
+                "dt_obs": float(dt),
+                "min_seg_steps": int(min_seg_steps_dt),
+                "dy_argmax_idx_fit_p10": dy_p10,
+                "dy_argmax_idx_fit_p50": dy_p50,
+                "dy_argmax_idx_fit_p90": dy_p90,
+                "mnj_argmax_idx_fit_p10": mnj_p10,
+                "mnj_argmax_idx_fit_p50": mnj_p50,
+                "mnj_argmax_idx_fit_p90": mnj_p90,
+                "kcpd_argmax_idx_fit_p10": kcpd_p10,
+                "kcpd_argmax_idx_fit_p50": kcpd_p50,
+                "kcpd_argmax_idx_fit_p90": kcpd_p90,
+                "abs_argmax_idx_diff_p10": abs_p10,
+                "abs_argmax_idx_diff_p50": abs_p50,
+                "abs_argmax_idx_diff_p90": abs_p90,
+                "abs_argmax_idx_diff_spread": abs_spread,
+                "abs_argmax_idx_diff_spread_frac": abs_spread_frac,
+                "gate_corr_pearson_p10": corr_p10,
+                "gate_corr_pearson_p50": corr_p50,
+                "gate_corr_pearson_p90": corr_p90,
+                "kcpd_gate_corr_vs_mnj_p10": kcpd_corr_mnj_p10,
+                "kcpd_gate_corr_vs_mnj_p50": kcpd_corr_mnj_p50,
+                "kcpd_gate_corr_vs_mnj_p90": kcpd_corr_mnj_p90,
+                "kcpd_abs_argmax_idx_diff_vs_mnj_p10": kcpd_abs_mnj_p10,
+                "kcpd_abs_argmax_idx_diff_vs_mnj_p50": kcpd_abs_mnj_p50,
+                "kcpd_abs_argmax_idx_diff_vs_mnj_p90": kcpd_abs_mnj_p90,
+                "mnj_trust_coverage_p10": trust_p10,
+                "mnj_trust_coverage_p50": trust_p50,
+                "mnj_trust_coverage_p90": trust_p90,
+                "mnj_cond_p50_p10": cond_p10,
+                "mnj_cond_p50_p50": cond_p50,
+                "mnj_cond_p50_p90": cond_p90,
+                "mnj_neighbors_p50_p10": nbr_p10,
+                "mnj_neighbors_p50_p50": nbr_p50,
+                "mnj_neighbors_p50_p90": nbr_p90,
+                "mnj_argmax_idx_spread": mnj_spread,
+                "mnj_argmax_idx_spread_frac": mnj_spread_frac,
+                "kcpd_argmax_idx_spread": kcpd_spread,
+                "kcpd_argmax_idx_spread_frac": kcpd_spread_frac,
+            }
+        )
+
+        if abs_spread_frac is not None:
+            abs_diff_spread_frac_over_dt.append(float(abs_spread_frac))
+        if mnj_spread_frac is not None:
+            mnj_argmax_spread_frac_over_dt.append(float(mnj_spread_frac))
+        if kcpd_spread_frac is not None:
+            kcpd_argmax_spread_frac_over_dt.append(float(kcpd_spread_frac))
+        if corr_p50 is not None:
+            corr_median_over_dt.append(float(corr_p50))
+        if kcpd_corr_mnj_p50 is not None:
+            kcpd_corr_vs_mnj_median_over_dt.append(float(kcpd_corr_mnj_p50))
+        if trust_p50 is not None:
+            trust_median_over_dt.append(float(trust_p50))
+        if cond_p90 is not None:
+            cond_p90_over_dt.append(float(cond_p90))
+
+    abs_argmax_idx_diff_spread_frac_over_dt_max = (
+        float(np.max(abs_diff_spread_frac_over_dt)) if abs_diff_spread_frac_over_dt else None
+    )
+    mnj_argmax_idx_spread_frac_over_dt_max = (
+        float(np.max(mnj_argmax_spread_frac_over_dt)) if mnj_argmax_spread_frac_over_dt else None
+    )
+    kcpd_argmax_idx_spread_frac_over_dt_max = (
+        float(np.max(kcpd_argmax_spread_frac_over_dt)) if kcpd_argmax_spread_frac_over_dt else None
+    )
+    gate_corr_pearson_median_over_dt_min = (
+        float(np.min(corr_median_over_dt)) if corr_median_over_dt else None
+    )
+    kcpd_gate_corr_vs_mnj_median_over_dt_min = (
+        float(np.min(kcpd_corr_vs_mnj_median_over_dt)) if kcpd_corr_vs_mnj_median_over_dt else None
+    )
+    mnj_trust_coverage_median_over_dt_min = (
+        float(np.min(trust_median_over_dt)) if trust_median_over_dt else None
+    )
+    mnj_cond_p50_p90_over_dt_max = float(np.max(cond_p90_over_dt)) if cond_p90_over_dt else None
+
     k_grid = bench.get("k_neighbors_grid", [10, 15, 20])
     ridge_grid = bench.get("ridge_lambda_grid", [1e-4, 1e-3, 1e-2])
     methods = bench.get("derivative_methods", ["finite_diff"])
@@ -858,61 +1445,85 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         methods = methods[:1]
     grid_pass = []
     grid_leak = []
-    for method in methods:
-        for k in k_grid:
-            for ridge in ridge_grid:
-                mnj_grid = fit_local_jacobian(
-                    mnps_full.X,
-                    t,
-                    k_neighbors=int(k),
-                    ridge_lambda=float(ridge),
-                    derivative_method=method,
-                    neighbor_strategy="knn",
-                    random_seed=0,
+    shuf_ok = abs(effect_shuf) <= shuffle_max
+    rand_ok = abs(effect_rand) <= random_max
+    grid_tasks: list[tuple[str, int, float]] = [
+        (str(method), int(k), float(ridge))
+        for method in methods
+        for k in k_grid
+        for ridge in ridge_grid
+    ]
+    if jobs <= 1 or len(grid_tasks) <= 1:
+        for method, k, ridge in grid_tasks:
+            out = _golden_a_grid_cell_worker(
+                X=mnps_full.X,
+                t=t,
+                t_switch=float(t_switch),
+                method=method,
+                k_neighbors=k,
+                ridge_lambda=ridge,
+                effect_min=float(effect_min),
+                shuf_ok=bool(shuf_ok),
+                rand_ok=bool(rand_ok),
+            )
+            grid_pass.append(bool(out["pass_cell"]))
+            grid_leak.append(bool(out["leak_cell"]))
+    else:
+        # Use threads here to avoid pickling large arrays to subprocesses.
+        # (fit_local_jacobian is numpy-heavy and releases the GIL often enough to benefit.)
+        max_workers = min(int(jobs), len(grid_tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = [
+                ex.submit(
+                    _golden_a_grid_cell_worker,
+                    X=mnps_full.X,
+                    t=t,
+                    t_switch=float(t_switch),
+                    method=method,
+                    k_neighbors=k,
+                    ridge_lambda=ridge,
+                    effect_min=float(effect_min),
+                    shuf_ok=bool(shuf_ok),
+                    rand_ok=bool(rand_ok),
                 )
-                traces_grid = np.trace(mnj_grid.J, axis1=1, axis2=2)
-                effect_grid = _cohens_d(
-                    traces_grid[t >= t_switch], traces_grid[t < t_switch]
-                )
-                shuf_ok = abs(effect_shuf) <= shuffle_max
-                rand_ok = abs(effect_rand) <= random_max
-                pass_cell = (effect_grid >= effect_min) and shuf_ok and rand_ok
-                grid_pass.append(pass_cell)
-                if (effect_grid >= effect_min) and not (shuf_ok and rand_ok):
-                    grid_leak.append(True)
-                else:
-                    grid_leak.append(False)
-
-                mnj_rand_grid = fit_local_jacobian(
-                    mnps_full.X,
-                    t,
-                    k_neighbors=int(k),
-                    ridge_lambda=float(ridge),
-                    derivative_method=method,
-                    neighbor_strategy="random",
-                    random_seed=0,
-                )
-                traces_rand_grid = np.trace(mnj_rand_grid.J, axis1=1, axis2=2)
-                effect_rand_grid = _cohens_d(
-                    traces_rand_grid[t >= t_switch], traces_rand_grid[t < t_switch]
-                )
+                for method, k, ridge in grid_tasks
+            ]
+            for fut in as_completed(futs):
+                out = fut.result()
+                grid_pass.append(bool(out["pass_cell"]))
+                grid_leak.append(bool(out["leak_cell"]))
     grid_pass_rate = float(np.mean(grid_pass)) if grid_pass else 0.0
     grid_leak_rate = float(np.mean(grid_leak)) if grid_leak else 0.0
 
     # Seed robustness bundle for Golden A1 (honest_middle)
     seed_rows: list[dict[str, float | int | None]] = []
     if (not smoke) and seeds:
-        for seed in seeds:
-            cfg_seed = cfg.model_copy(deep=True)
-            cfg_seed.seed = int(seed)
-            cfg_seed.output.save_oracle = True
-            _, data_seed = _run_and_load_obs(cfg_seed, out_dir, f"golden_a_seed_{seed}")
-            seed_rows.append(
-                {
-                    "seed": int(seed),
-                    **_a1_seed_metrics(data_seed, t=data_seed["t"], bench=bench, random_seed=int(seed)),
-                }
-            )
+        if jobs == 1:
+            for seed in seeds:
+                seed_rows.append(
+                    _golden_a_seed_worker(
+                        preset=str(preset),
+                        bench=bench,
+                        out_dir=str(out_dir),
+                        seed=int(seed),
+                    )
+                )
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                futs = [
+                    ex.submit(
+                        _golden_a_seed_worker,
+                        preset=str(preset),
+                        bench=bench,
+                        out_dir=str(out_dir),
+                        seed=int(seed),
+                    )
+                    for seed in seeds
+                ]
+                for fut in as_completed(futs):
+                    seed_rows.append(fut.result())
+            # keep deterministic order for downstream reporting
+            seed_rows.sort(key=lambda r: int(r.get("seed", 0)))
 
     oracle_path = out_dir / "golden_a_oracle.h5"
     pred_metrics = _prediction_metrics(
@@ -1674,6 +2285,50 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         )
     )
 
+    # dt_obs stability hygiene checks (diagnostic; recommend WARN-only)
+    gate_abs_argmax_diff_spread_frac_max = float(
+        thresholds.get("gate_abs_argmax_diff_spread_frac_max", 1e9)
+    )
+    mnj_argmax_idx_spread_frac_max = float(
+        thresholds.get("mnj_argmax_idx_spread_frac_max", 1e9)
+    )
+    mnj_trust_coverage_median_min = float(
+        thresholds.get("mnj_trust_coverage_median_min", 0.0)
+    )
+    mnj_cond_p50_p90_max = float(thresholds.get("mnj_cond_p50_p90_max", 1e9))
+    gate_corr_pearson_median_over_dt_min_thr = float(
+        thresholds.get("gate_corr_pearson_median_over_dt_min", -1.0)
+    )
+
+    gate_dt_abs_argmax_diff_spread_ok = True
+    if abs_argmax_idx_diff_spread_frac_over_dt_max is not None:
+        gate_dt_abs_argmax_diff_spread_ok = (
+            float(abs_argmax_idx_diff_spread_frac_over_dt_max)
+            <= gate_abs_argmax_diff_spread_frac_max
+        )
+
+    gate_dt_mnj_argmax_spread_ok = True
+    if mnj_argmax_idx_spread_frac_over_dt_max is not None:
+        gate_dt_mnj_argmax_spread_ok = (
+            float(mnj_argmax_idx_spread_frac_over_dt_max) <= mnj_argmax_idx_spread_frac_max
+        )
+
+    gate_dt_trust_coverage_nonzero = True
+    if mnj_trust_coverage_median_over_dt_min is not None:
+        gate_dt_trust_coverage_nonzero = (
+            float(mnj_trust_coverage_median_over_dt_min) >= mnj_trust_coverage_median_min
+        )
+
+    gate_dt_cond_hygiene_ok = True
+    if mnj_cond_p50_p90_over_dt_max is not None:
+        gate_dt_cond_hygiene_ok = float(mnj_cond_p50_p90_over_dt_max) <= mnj_cond_p50_p90_max
+
+    gate_dt_corr_not_strongly_negative = True
+    if gate_corr_pearson_median_over_dt_min is not None:
+        gate_dt_corr_not_strongly_negative = (
+            float(gate_corr_pearson_median_over_dt_min) >= gate_corr_pearson_median_over_dt_min_thr
+        )
+
     hard_checks = {
         "effect_size_min": effect_size >= effect_min,
         "time_shuffle_max": abs(effect_shuf) <= shuffle_max,
@@ -1723,6 +2378,12 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         "global_honest_tail_nonnegative": global_honest_tail_nonnegative,
         # MNJ vs ΔY is a strong baseline comparison; treat as diagnostic (WARN) not a hard gate.
         "mnj_gate_beats_dy_gate": mnj_gate_beats_dy_gate,
+        # dt_obs stability hygiene (diagnostic)
+        "gate_dt_abs_argmax_diff_spread_ok": gate_dt_abs_argmax_diff_spread_ok,
+        "gate_dt_mnj_argmax_spread_ok": gate_dt_mnj_argmax_spread_ok,
+        "gate_dt_trust_coverage_nonzero": gate_dt_trust_coverage_nonzero,
+        "gate_dt_cond_hygiene_ok": gate_dt_cond_hygiene_ok,
+        "gate_dt_corr_not_strongly_negative": gate_dt_corr_not_strongly_negative,
     }
     checks = {**hard_checks, **soft_checks}
     hard_failed = any((k not in set(checks_skipped)) and (not v) for k, v in hard_checks.items())
@@ -1739,6 +2400,10 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         # Smoke runs are for pipeline integrity, not scientific verdicts.
         status = "warn"
         smoke_status_overridden = True
+    # Ensure deterministic output ordering for reproducibility across jobs.
+    gate_stability_rows.sort(
+        key=lambda r: (float(r.get("dt_obs", 0.0)), int(r.get("seed", 0)))
+    )
     metrics = {
         "effect_size": effect_size,
         "effect_size_shuffled": effect_shuf,
@@ -1750,6 +2415,16 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         "dt_obs_cap_auc": auc,
         "dt_obs_cap_auc_low": low_auc,
         "dt_obs_cap_auc_high": high_auc,
+        # Gate stability & agreement (characterization; fixed computation)
+        "gate_stability_rows": gate_stability_rows,
+        "gate_stability_dt_rows": gate_stability_dt_rows,
+        "abs_argmax_idx_diff_spread_frac_over_dt_max": abs_argmax_idx_diff_spread_frac_over_dt_max,
+        "mnj_argmax_idx_spread_frac_over_dt_max": mnj_argmax_idx_spread_frac_over_dt_max,
+        "gate_corr_pearson_median_over_dt_min": gate_corr_pearson_median_over_dt_min,
+        "kcpd_argmax_idx_spread_frac_over_dt_max": kcpd_argmax_idx_spread_frac_over_dt_max,
+        "kcpd_gate_corr_vs_mnj_median_over_dt_min": kcpd_gate_corr_vs_mnj_median_over_dt_min,
+        "mnj_trust_coverage_median_over_dt_min": mnj_trust_coverage_median_over_dt_min,
+        "mnj_cond_p50_p90_over_dt_max": mnj_cond_p50_p90_over_dt_max,
         "evr": evr.tolist(),
         "rel_mse_median": float(np.median(rel_mse)),
         "prediction_gain": prediction_gain,
@@ -2030,8 +2705,6 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
         "applicability_grid_ok": grid_applicable,
         "applicability_grid_cells": grid_cells,
         "smoke_status_overridden": smoke_status_overridden,
-        # Gate stability & agreement (characterization; fixed computation)
-        "gate_stability_rows": gate_stability_rows,
         "gate_agreement_abs_argmax_idx_diff_median": float(np.median(gate_agreement_abs_idx_diffs))
         if gate_agreement_abs_idx_diffs
         else None,
@@ -2068,8 +2741,35 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
             "prediction_gain_segmented_mnj_gate_shuffled_honest_middle": _quantile_summary(
                 [row.get("prediction_gain_segmented_mnj_gate_shuffled_honest_middle") for row in seed_rows]
             ),
+            "prediction_gain_segmented_kcpd_gate_honest_middle": _quantile_summary(
+                [row.get("prediction_gain_segmented_kcpd_gate_honest_middle") for row in seed_rows]
+            ),
+            "prediction_gain_segmented_kcpd_gate_shuffled_honest_middle": _quantile_summary(
+                [row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle") for row in seed_rows]
+            ),
             "mnj_gate_trust_coverage": _quantile_summary(
                 [row.get("mnj_gate_trust_coverage") for row in seed_rows]
+            ),
+            "mnj_gate_neighbor_radius_p50": _quantile_summary(
+                [row.get("mnj_gate_neighbor_radius_p50") for row in seed_rows]
+            ),
+            "mnj_gate_neighbor_dist_median_p50": _quantile_summary(
+                [row.get("mnj_gate_neighbor_dist_median_p50") for row in seed_rows]
+            ),
+            "mnj_k_grid_gain_over_k_median": _quantile_summary(
+                [row.get("mnj_k_grid_gain_over_k_median") for row in seed_rows]
+            ),
+            "mnj_k_grid_argmax_idx_over_k_median": _quantile_summary(
+                [row.get("mnj_k_grid_argmax_idx_over_k_median") for row in seed_rows]
+            ),
+            "mnj_k_grid_cond_p50_over_k_median": _quantile_summary(
+                [row.get("mnj_k_grid_cond_p50_over_k_median") for row in seed_rows]
+            ),
+            "mnj_k_grid_neighbor_radius_p50_over_k_median": _quantile_summary(
+                [row.get("mnj_k_grid_neighbor_radius_p50_over_k_median") for row in seed_rows]
+            ),
+            "mnj_k_grid_neighbor_dist_median_p50_over_k_median": _quantile_summary(
+                [row.get("mnj_k_grid_neighbor_dist_median_p50_over_k_median") for row in seed_rows]
             ),
             "gate_agreement_abs_argmax_idx_diff": _quantile_summary(
                 [row.get("abs_argmax_idx_diff") for row in seed_rows]
@@ -2077,10 +2777,30 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
             "gate_agreement_corr_pearson": _quantile_summary(
                 [row.get("gate_corr_pearson") for row in seed_rows]
             ),
+            "kcpd_gate_corr_vs_mnj": _quantile_summary(
+                [row.get("kcpd_gate_corr_vs_mnj") for row in seed_rows]
+            ),
+            "kcpd_gate_corr_vs_dy": _quantile_summary(
+                [row.get("kcpd_gate_corr_vs_dy") for row in seed_rows]
+            ),
+            "kcpd_gate_abs_argmax_idx_diff_vs_mnj": _quantile_summary(
+                [row.get("abs_argmax_idx_diff_kcpd_vs_mnj") for row in seed_rows]
+            ),
+            "kcpd_gate_abs_argmax_idx_diff_vs_dy": _quantile_summary(
+                [row.get("abs_argmax_idx_diff_kcpd_vs_dy") for row in seed_rows]
+            ),
             "mnj_gate_vs_shifted_gain_delta": _quantile_summary(
                 [
                     (row.get("prediction_gain_segmented_mnj_gate_honest_middle") - row.get("prediction_gain_segmented_mnj_gate_shuffled_honest_middle"))
                     if (row.get("prediction_gain_segmented_mnj_gate_honest_middle") is not None and row.get("prediction_gain_segmented_mnj_gate_shuffled_honest_middle") is not None)
+                    else None
+                    for row in seed_rows
+                ]
+            ),
+            "kcpd_gate_vs_shifted_gain_delta": _quantile_summary(
+                [
+                    (row.get("prediction_gain_segmented_kcpd_gate_honest_middle") - row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle"))
+                    if (row.get("prediction_gain_segmented_kcpd_gate_honest_middle") is not None and row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle") is not None)
                     else None
                     for row in seed_rows
                 ]
@@ -2091,6 +2811,30 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
             "mnj_shifted_argmax_abs_err_vs_oracle": _quantile_summary(
                 [row.get("mnj_gate_shuffled_argmax_abs_err_vs_oracle") for row in seed_rows]
             ),
+            "dy_argmax_abs_err_vs_oracle": _quantile_summary(
+                [row.get("dy_gate_argmax_abs_err_vs_oracle") for row in seed_rows]
+            ),
+            "kcpd_argmax_abs_err_vs_oracle": _quantile_summary(
+                [row.get("kcpd_gate_argmax_abs_err_vs_oracle") for row in seed_rows]
+            ),
+            "kcpd_shifted_argmax_abs_err_vs_oracle": _quantile_summary(
+                [row.get("kcpd_gate_shuffled_argmax_abs_err_vs_oracle") for row in seed_rows]
+            ),
+            "jacobian_align_cos_pre_p50": _quantile_summary(
+                [row.get("jacobian_align_cos_pre_p50") for row in seed_rows]
+            ),
+            "jacobian_align_cos_post_p50": _quantile_summary(
+                [row.get("jacobian_align_cos_post_p50") for row in seed_rows]
+            ),
+            "jacobian_align_cos_post_minus_pre_p50": _quantile_summary(
+                [row.get("jacobian_align_cos_post_minus_pre_p50") for row in seed_rows]
+            ),
+            "jacobian_align_drop_argmax_abs_err_vs_oracle": _quantile_summary(
+                [row.get("jacobian_align_drop_argmax_abs_err_vs_oracle") for row in seed_rows]
+            ),
+            "jacobian_align_drop_vs_gate_corr_pearson": _quantile_summary(
+                [row.get("jacobian_align_drop_vs_gate_corr_pearson") for row in seed_rows]
+            ),
             "mnj_shifted_minus_random_mean_gain": _quantile_summary(
                 [
                     (row.get("prediction_gain_segmented_mnj_gate_shuffled_honest_middle") - row.get("prediction_gain_segmented_random_split_honest_middle_mean"))
@@ -2098,6 +2842,33 @@ def _golden_a(bench: dict[str, Any], *, out_dir: Path, smoke: bool) -> Benchmark
                     else None
                     for row in seed_rows
                 ]
+            ),
+            "kcpd_shifted_minus_random_mean_gain": _quantile_summary(
+                [
+                    (row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle") - row.get("prediction_gain_segmented_random_split_honest_middle_mean"))
+                    if (row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle") is not None and row.get("prediction_gain_segmented_random_split_honest_middle_mean") is not None)
+                    else None
+                    for row in seed_rows
+                ]
+            ),
+            "kcpd_shifted_collapse_fraction_le_random_plus_margin": (
+                None
+                if not seed_rows
+                else float(
+                    np.mean(
+                        [
+                            (
+                                (row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle") is not None)
+                                and (row.get("prediction_gain_segmented_random_split_honest_middle_mean") is not None)
+                                and (
+                                    float(row.get("prediction_gain_segmented_kcpd_gate_shuffled_honest_middle"))
+                                    <= float(row.get("prediction_gain_segmented_random_split_honest_middle_mean")) + 0.01
+                                )
+                            )
+                            for row in seed_rows
+                        ]
+                    )
+                )
             ),
             "mnj_shifted_collapse_fraction_le_random_plus_margin": (
                 None
